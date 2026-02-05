@@ -1,8 +1,4 @@
-import streamlit as st
-from groq import Groq
-from tavily import TavilyClient
-
-# 1. SETUP PAGE (Standard Mode - No hiding)
+ard Mode - No hiding)
 st.set_page_config(page_title="Sunny's AI", page_icon="🤖")
 st.title("🤖 Sunny's AI")
 
@@ -88,3 +84,4 @@ if prompt := st.chat_input("Ask a question..."):
         "content": answer,
         "sources": sources
     })
+
