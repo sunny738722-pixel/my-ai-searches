@@ -3,76 +3,71 @@ from groq import Groq
 from tavily import TavilyClient
 
 # ==============================================================================
-# 🔐 PASTE YOUR KEYS HERE (If you haven't set them in Secrets yet)
+# 🔐 SECRETS (These are loaded safely from Streamlit Cloud)
 # ==============================================================================
-# Note: Since you set up Secrets, you technically don't need to paste them here 
-# if you use st.secrets["GROQ_API_KEY"], but for now, let's keep it simple.
-# ==============================================================================
+# We use st.secrets so your keys are never exposed in the code
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
 
+# ==============================================================================
+# 🎨 UI CONFIGURATION (Stealth Mode)
+# ==============================================================================
 st.set_page_config(
-    page_title="Perplexity Clone",
+    page_title="Sunny's AI",
     page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="collapsed" # Hide sidebar by default
+    layout="centered" # 'centered' looks more like a chat app on mobile
 )
 
-# --- 1. THE STEALTH MODE (CSS HACK) ---
-# This hides the "Manage App" button, the hamburger menu, and the footer.
+# This CSS hides the "Made with Streamlit" footer and the top menu
 hide_streamlit_style = """
 <style>
-    /* Hide the top header line */
-    header {visibility: hidden;}
-    
-    /* Hide the main menu (hamburger) */
-    #MainMenu {visibility: hidden;}
-    
-    /* Hide the footer (Made with Streamlit) */
-    footer {visibility: hidden;}
-    
-    /* Hide the "View Source" button on mobile */
-    [data-testid="stToolbar"] {visibility: hidden; display: none;}
+/* Hide the top right hamburger menu */
+#MainMenu {visibility: hidden;}
+
+/* Hide the "Made with Streamlit" footer */
+footer {visibility: hidden;}
+
+/* Hide the "Deploy" button */
+.stDeployButton {display:none;}
+
+/* Make the input box look cleaner */
+.stTextInput > div > div > input {
+    border-radius: 20px;
+}
 </style>
 """
 st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
-# --- 2. SETUP ---
+# ==============================================================================
+# 🧠 APP LOGIC
+# ==============================================================================
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Try to get keys from Secrets (Best Practice) or fall back to hardcoded
-# This makes it safe to show code because keys aren't visible
 try:
-    GROQ_KEY = st.secrets["GROQ_API_KEY"]
-    TAVILY_KEY = st.secrets["TAVILY_API_KEY"]
-except:
-    # If you haven't set up Secrets yet, paste them here temporarily
-    GROQ_KEY = "gsk_..." 
-    TAVILY_KEY = "tvly-..."
-
-try:
-    groq_client = Groq(api_key=GROQ_KEY)
-    tavily_client = TavilyClient(api_key=TAVILY_KEY)
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 except Exception as e:
     st.error(f"❌ Connection Error: {e}")
 
-# --- 3. HELPER FUNCTIONS ---
 def search_web(query):
     try:
         response = tavily_client.search(query, max_results=3)
         results = response.get("results", [])
-        context = ""
-        for i, res in enumerate(results):
-            context += f"SOURCE {i+1}: {res['title']} | URL: {res['url']} | CONTENT: {res['content']}\n\n"
-        return context, results
-    except:
+        context_text = ""
+        for i, result in enumerate(results):
+            context_text += f"SOURCE {i+1}: {result['title']} | URL: {result['url']} | CONTENT: {result['content']}\n\n"
+        return context_text, results
+    except Exception:
         return "", []
 
 def stream_ai_answer(messages, search_context):
     system_prompt = {
         "role": "system",
         "content": (
-            "You are a helpful assistant. Answer the user's question based on the SEARCH RESULTS. "
-            "Be direct and concise. Do not explicitly say 'According to the search results'."
+            "You are a helpful assistant. "
+            "Use the provided SEARCH RESULTS to answer the user's last question. "
             f"\n\nSEARCH RESULTS:\n{search_context}"
         )
     }
@@ -88,10 +83,14 @@ def stream_ai_answer(messages, search_context):
         if chunk.choices[0].delta.content:
             yield chunk.choices[0].delta.content
 
-# --- 4. MAIN UI ---
-st.title("🤖 AI Search Engine")
-st.caption("Ask anything. I search the web for you.")
+# ==============================================================================
+# 📱 MAIN INTERFACE
+# ==============================================================================
 
+st.title("🤖 Sunny's AI")
+st.caption("Private & Secure Personal Search")
+
+# Display Chat History
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
@@ -100,20 +99,40 @@ for message in st.session_state.messages:
                 for source in message["sources"]:
                     st.markdown(f"- [{source['title']}]({source['url']})")
 
-if prompt := st.chat_input("What would you like to know?"):
+# Chat Input
+if prompt := st.chat_input("Ask me anything..."):
+    
+    # User Message
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     
+    # Assistant Message
     with st.chat_message("assistant"):
-        with st.spinner("Searching..."):
-            search_context, sources = search_web(prompt)
+        # Search Phase
+        status_text = st.empty() # Create an empty placeholder
+        status_text.caption("🔎 Searching the web...")
         
+        search_context, sources = search_web(prompt)
+        
+        # Thinking Phase
+        status_text.caption("🧠 Thinking...")
+        
+        # Streaming Answer
         full_response = st.write_stream(stream_ai_answer(st.session_state.messages, search_context))
         
+        # Clear the status text once done
+        status_text.empty()
+        
+        # Show Sources
         if sources:
-            with st.expander("📚 Sources"):
+            with st.expander("📚 Sources Used"):
                 for source in sources:
                     st.markdown(f"- [{source['title']}]({source['url']})")
     
-    st.session_state.messages.append({"role": "assistant", "content": full_response, "sources": sources})
+    # Save History
+    st.session_state.messages.append({
+        "role": "assistant", 
+        "content": full_response,
+        "sources": sources
+    })
