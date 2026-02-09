@@ -41,7 +41,6 @@ if "active_chat_id" not in st.session_state:
     st.session_state.active_chat_id = new_id
 
 active_id = st.session_state.active_chat_id
-# Safety check
 if active_id not in st.session_state.all_chats:
     st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None}
 active_chat = st.session_state.all_chats[active_id]
@@ -67,7 +66,7 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Error reading data: {e}")
 
-    # B. LIBRARIAN (PDF)
+    # B. LIBRARIAN
     st.markdown("### 📂 Document Reader")
     uploaded_pdf = st.file_uploader("Upload PDF:", type="pdf")
     if uploaded_pdf:
@@ -104,7 +103,7 @@ with st.sidebar:
                 pdf.ln(5)
             st.download_button("Click to Save PDF", data=pdf.output(dest='S').encode('latin-1'), file_name="report.pdf")
 
-    # NEW CHAT & HISTORY
+    # HISTORY CONTROLS
     if st.button("➕ New Discussion", use_container_width=True, type="primary"):
         new_id = str(uuid.uuid4())
         st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None}
@@ -140,8 +139,11 @@ def transcribe_audio(audio_bytes):
 
 def classify_intent(user_query, has_data=False):
     uq_lower = user_query.lower()
-    # 1. Image Generation Check (Made more robust)
-    if any(w in uq_lower for w in ["generate image", "create image", "image of", "draw a", "paint a"]):
+    
+    # 1. SUPER AGGRESSIVE IMAGE CHECK
+    # If the user says any of these, we FORCE image mode.
+    image_triggers = ["generate image", "create image", "image of", "draw a", "paint a", "sketch a", "picture of"]
+    if any(trigger in uq_lower for trigger in image_triggers):
         return "IMAGE"
     
     # 2. Data Check
@@ -149,7 +151,7 @@ def classify_intent(user_query, has_data=False):
         if any(w in uq_lower for w in ["plot", "chart", "graph"]): return "PLOT"
         if any(w in uq_lower for w in ["analyze", "summary"]): return "ANALYZE"
     
-    # 3. General Check
+    # 3. Fallback to LLM for subtle cases
     system_prompt = "Classify intent: 'SEARCH' (facts/news), 'CHAT' (casual). Return ONLY word."
     try:
         resp = groq_client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_query}], max_tokens=10)
@@ -179,7 +181,7 @@ def generate_audio(text):
     except: return None
 
 def generate_image(prompt):
-    # We use Pollinations AI for free image generation
+    # Pollinations AI (No Key Needed)
     clean_prompt = prompt.replace(" ", "%20")
     return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
@@ -219,7 +221,7 @@ def stream_ai_answer(messages, search_results, doc_text, df):
 st.title(f"{active_chat['title']}")
 
 # Display History
-for i, message in enumerate(active_chat["messages"]):
+for message in active_chat["messages"]:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         
@@ -248,6 +250,7 @@ if prompt:
     final_prompt = prompt
 
 if final_prompt:
+    # 1. Double Submission Check
     if active_chat["messages"]:
         if active_chat["messages"][-1]["role"] == "assistant":
             if len(active_chat["messages"]) >= 2 and final_prompt == active_chat["messages"][-2]["content"]:
@@ -257,29 +260,31 @@ if final_prompt:
         st.markdown(final_prompt)
     active_chat["messages"].append({"role": "user", "content": final_prompt})
     
+    # 2. Update Title (Fixed Typo Here!)
     if len(active_chat["messages"]) == 1:
-        st.session_session.all_chats[active_id]["title"] = " ".join(final_prompt.split()[:5]) + "..."
+        st.session_state.all_chats[active_id]["title"] = " ".join(final_prompt.split()[:5]) + "..."
 
     with st.chat_message("assistant"):
         df = active_chat["dataframe"]
         intent = classify_intent(final_prompt, has_data=(df is not None))
         
-        # --- IMAGE GENERATION PATH ---
+        # DEBUG MESSAGE (REMOVE LATER IF YOU WANT)
+        st.toast(f"Detected Intent: {intent}")
+        
+        # --- PATH 1: IMAGE GENERATION ---
         if intent == "IMAGE":
             with st.spinner("🎨 Painting your imagination..."):
                 image_url = generate_image(final_prompt)
                 st.image(image_url, caption=final_prompt)
                 full_response = f"Here is the image for: {final_prompt}"
                 
-                # Save to history
                 active_chat["messages"].append({
                     "role": "assistant", 
                     "content": full_response, 
                     "image_url": image_url
                 })
-                # No rerun needed here, we just showed it.
         
-        # --- STANDARD PATH ---
+        # --- PATH 2: STANDARD AI ---
         else:
             search_results = []
             if intent == "SEARCH" or (deep_mode and not df and not active_chat["doc_text"]):
@@ -315,5 +320,6 @@ if final_prompt:
             
             active_chat["messages"].append(msg_data)
             
+            # Rerun for standard path
             if len(active_chat["messages"]) == 2:
                 st.rerun()
