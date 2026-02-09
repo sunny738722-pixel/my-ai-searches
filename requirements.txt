@@ -8,3 +8,5 @@ pandas
 openpyxl
 matplotlib
 tabulate
+gTTS 
+
