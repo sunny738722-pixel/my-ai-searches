@@ -4,3 +4,5 @@ tavily-python
 
 duckduckgo-search
 PyPDF2
+fpdf
+
