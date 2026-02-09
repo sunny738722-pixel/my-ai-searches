@@ -7,6 +7,9 @@ import PyPDF2
 from fpdf import FPDF
 import pandas as pd
 import re
+from gtts import gTTS
+import tempfile
+import os
 
 # ------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
@@ -38,6 +41,7 @@ if "active_chat_id" not in st.session_state:
     st.session_state.active_chat_id = new_id
 
 active_id = st.session_state.active_chat_id
+# Safety check
 if active_id not in st.session_state.all_chats:
     st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None}
 active_chat = st.session_state.all_chats[active_id]
@@ -48,17 +52,15 @@ active_chat = st.session_state.all_chats[active_id]
 with st.sidebar:
     st.title("🧠 Research Center")
     
-    # A. DATA ANALYST (Path A)
+    # A. DATA ANALYST
     st.markdown("### 📊 Data Analyst")
     uploaded_csv = st.file_uploader("Upload CSV or Excel:", type=["csv", "xlsx"])
-    
     if uploaded_csv:
         try:
             if uploaded_csv.name.endswith('.csv'):
                 df = pd.read_csv(uploaded_csv)
             else:
                 df = pd.read_excel(uploaded_csv)
-            
             st.session_state.all_chats[active_id]["dataframe"] = df
             st.session_state.all_chats[active_id]["file_name"] = uploaded_csv.name
             st.success(f"✅ Loaded Data: {uploaded_csv.name} ({len(df)} rows)")
@@ -83,6 +85,8 @@ with st.sidebar:
     
     # SETTINGS
     deep_mode = st.toggle("🚀 Deep Research", value=False)
+    # --- NEW FEATURE: VOICE TOGGLE ---
+    enable_voice = st.toggle("🔊 Hear AI Response", value=False, help="Enable Text-to-Speech")
     
     # EXPORT
     if st.button("📥 Download Chat PDF"):
@@ -136,13 +140,9 @@ def transcribe_audio(audio_bytes):
     except: return None
 
 def classify_intent(user_query, has_data=False):
-    # If we have data, we prioritize DATA analysis
     if has_data:
-        if "plot" in user_query.lower() or "chart" in user_query.lower() or "graph" in user_query.lower():
-            return "PLOT"
-        if "analyze" in user_query.lower() or "summary" in user_query.lower():
-            return "ANALYZE"
-            
+        if any(w in user_query.lower() for w in ["plot", "chart", "graph"]): return "PLOT"
+        if any(w in user_query.lower() for w in ["analyze", "summary"]): return "ANALYZE"
     system_prompt = "Classify intent: 'SEARCH' (facts/news), 'CHAT' (casual). Return ONLY word."
     try:
         resp = groq_client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_query}], max_tokens=10)
@@ -150,14 +150,10 @@ def classify_intent(user_query, has_data=False):
     except: return "SEARCH"
 
 def search_web(query, is_deep_mode):
-    if is_deep_mode: return tavily_client.search(query, max_results=5).get("results", []) # Simplified for brevity
+    if is_deep_mode: return tavily_client.search(query, max_results=5).get("results", [])
     return tavily_client.search(query, max_results=3).get("results", [])
 
 def execute_python_code(code, df):
-    """
-    Executes AI-generated Python code safely.
-    The code has access to: 'pd', 'st', 'df'
-    """
     local_vars = {"pd": pd, "st": st, "df": df}
     try:
         exec(code, {}, local_vars)
@@ -165,8 +161,23 @@ def execute_python_code(code, df):
     except Exception as e:
         return f"❌ Code Error: {e}"
 
+def generate_audio(text):
+    """Generates an MP3 file from text using gTTS"""
+    try:
+        # Clean text slightly (remove large markdown chunks for better speech)
+        clean_text = text.replace("*", "").replace("#", "").replace("`", "")
+        # Limit length to avoid long waits
+        if len(clean_text) > 1000:
+            clean_text = clean_text[:1000] + "... (speech truncated)"
+            
+        tts = gTTS(text=clean_text, lang='en')
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+            tts.save(fp.name)
+            return fp.name
+    except Exception as e:
+        return None
+
 def stream_ai_answer(messages, search_results, doc_text, df):
-    # 1. Build Context
     context = ""
     if search_results:
         context += "\nWEB SOURCES:\n" + "\n".join([f"- {r['title']}: {r['content']}" for r in search_results])
@@ -174,16 +185,11 @@ def stream_ai_answer(messages, search_results, doc_text, df):
         context += f"\n\nDOCUMENT CONTEXT:\n{doc_text[:20000]}..."
     if df is not None:
         context += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
-        context += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ``` blocks. Use 'st.bar_chart(df)', 'st.line_chart(df)', or 'st.write(df)'. Do NOT use plt.show()."
+        context += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```. Use st.bar_chart(df) etc."
 
     system_prompt = {
-        "role": "system",
-        "content": (
-            "You are a helpful AI Assistant. "
-            "Use the provided context to answer. "
-            "If writing code, keep it simple and use Streamlit functions."
-            f"{context}"
-        )
+        "role": "system", 
+        "content": f"You are a helpful AI Assistant. Use context to answer. {context}"
     }
     
     clean_history = [{"role": m["role"], "content": m["content"]} for m in messages]
@@ -206,19 +212,17 @@ def stream_ai_answer(messages, search_results, doc_text, df):
 # ------------------------------------------------------------------
 st.title(f"{active_chat['title']}")
 
-# Display History (and Charts!)
+# Display History
 for i, message in enumerate(active_chat["messages"]):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        
-        # Check for saved charts/code execution in history
         if "code_ran" in message and active_chat["dataframe"] is not None:
             with st.expander("📊 Analysis Output"):
                 execute_python_code(message["code_ran"], active_chat["dataframe"])
 
 # Input
 audio_value = st.audio_input("🎙️")
-prompt = st.chat_input("Ask about data, docs, or web...")
+prompt = st.chat_input("Ask anything...")
 final_prompt = None
 
 if audio_value:
@@ -228,7 +232,6 @@ if prompt:
     final_prompt = prompt
 
 if final_prompt:
-    # Double-submission check
     if active_chat["messages"]:
         if active_chat["messages"][-1]["role"] == "assistant":
             if len(active_chat["messages"]) >= 2 and final_prompt == active_chat["messages"][-2]["content"]:
@@ -241,7 +244,6 @@ if final_prompt:
     if len(active_chat["messages"]) == 1:
         st.session_state.all_chats[active_id]["title"] = " ".join(final_prompt.split()[:5]) + "..."
 
-    # LOGIC: Decide what to do
     with st.chat_message("assistant"):
         df = active_chat["dataframe"]
         intent = classify_intent(final_prompt, has_data=(df is not None))
@@ -256,23 +258,26 @@ if final_prompt:
             stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"], df)
         )
         
-        # CODE EXECUTION LOGIC (The "Analyst" Magic)
+        # --- CODE EXECUTION ---
         code_block = None
         if df is not None:
-            # Look for python code in the response
             match = re.search(r"```python(.*?)```", full_response, re.DOTALL)
             if match:
                 code_block = match.group(1).strip()
                 st.markdown("### 📊 Generating Chart...")
                 result = execute_python_code(code_block, df)
-                if "Error" in result:
-                    st.error(result)
+                if "Error" in result: st.error(result)
         
-    # Save message
+        # --- VOICE GENERATION (NEW) ---
+        if enable_voice:
+            with st.spinner("Generating audio..."):
+                audio_file = generate_audio(full_response)
+                if audio_file:
+                    st.audio(audio_file, format="audio/mp3")
+
     msg_data = {"role": "assistant", "content": full_response, "sources": search_results}
     if code_block:
-        msg_data["code_ran"] = code_block # Save the code so we can re-run it when history loads
-        
+        msg_data["code_ran"] = code_block
     active_chat["messages"].append(msg_data)
     
     if len(active_chat["messages"]) == 2:
