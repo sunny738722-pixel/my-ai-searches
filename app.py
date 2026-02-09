@@ -30,7 +30,6 @@ if "active_chat_id" not in st.session_state:
     st.session_state.active_chat_id = new_id
 
 active_id = st.session_state.active_chat_id
-# Safety check
 if active_id not in st.session_state.all_chats:
     st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": ""}
 active_chat = st.session_state.all_chats[active_id]
@@ -69,7 +68,7 @@ with st.sidebar:
         st.session_state.active_chat_id = new_id
         st.rerun()
 
-    # D. EXPORT TO PDF (Feature Path C)
+    # D. EXPORT TO PDF
     if st.button("📥 Download Chat as PDF"):
         if active_chat["messages"]:
             pdf = FPDF()
@@ -79,6 +78,7 @@ with st.sidebar:
             
             for msg in active_chat["messages"]:
                 role = "User" if msg["role"] == "user" else "AI"
+                # Handle unicode issues for PDF
                 clean_content = msg["content"].encode('latin-1', 'replace').decode('latin-1')
                 pdf.set_font("Arial", 'B', 12)
                 pdf.cell(200, 10, txt=f"{role}:", ln=True)
@@ -129,14 +129,41 @@ except Exception:
 # ------------------------------------------------------------------
 def transcribe_audio(audio_bytes):
     try:
+        audio_bytes.seek(0)
         return groq_client.audio.transcriptions.create(
             file=("voice.wav", audio_bytes),
-            model="whisper-large-v3", # Switched to the more stable model
+            model="whisper-large-v3", 
             response_format="text"
         )
     except Exception as e:
-        st.error(f"❌ Audio Error: {e}") # This will show you the error on screen!
+        st.error(f"❌ Audio Error: {e}")
         return None
+
+def classify_intent(user_query):
+    """
+    Decides if the user wants to CHAT or SEARCH.
+    Returns: 'SEARCH' or 'CHAT'
+    """
+    system_prompt = (
+        "You are an intent classifier. Analyze the user's input."
+        "\n- If it requires facts, news, data, or research -> Return 'SEARCH'."
+        "\n- If it is casual conversation, greetings, personal feelings, or creative writing -> Return 'CHAT'."
+        "\n- Return ONLY the word 'SEARCH' or 'CHAT'. Do not explain."
+    )
+    
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant", # Fast model for quick decision
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query}
+            ],
+            temperature=0,
+            max_tokens=10
+        )
+        return response.choices[0].message.content.strip().upper()
+    except:
+        return "SEARCH" # Default to search if error
 
 def generate_sub_queries(user_query):
     system_prompt = "You are a search expert. Return 3 search queries as a JSON list. Example: [\"q1\", \"q2\"]"
@@ -184,9 +211,17 @@ def stream_ai_answer(messages, search_results, doc_text):
     if doc_text:
         doc_context = f"\n\n📂 DOCUMENT CONTENT:\n{doc_text[:30000]}..."
 
-    system_prompt = {
-        "role": "system",
-        "content": (
+    # NEW: Adjust prompt based on whether we have sources or not
+    if not web_context and not doc_context:
+        # Chat Mode Prompt
+        system_prompt_text = (
+            "You are a friendly and helpful AI assistant named Sunny's AI. "
+            "Engage in casual conversation. Be empathetic, funny, or professional depending on the tone. "
+            "Do NOT mention 'search results' or 'sources'."
+        )
+    else:
+        # Search Mode Prompt
+        system_prompt_text = (
             "You are an expert research assistant."
             "\n- If the user asks about the Document, use '📂 DOCUMENT CONTENT'."
             "\n- If general, use 'WEB SOURCE'."
@@ -194,14 +229,15 @@ def stream_ai_answer(messages, search_results, doc_text):
             f"\n\n{web_context}"
             f"\n\n{doc_context}"
         )
-    }
+
+    system_prompt = {"role": "system", "content": system_prompt_text}
     clean_history = [{"role": m["role"], "content": m["content"]} for m in messages]
     
     try:
         stream = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[system_prompt] + clean_history,
-            temperature=0.6,
+            temperature=0.7,
             stream=True,
         )
         for chunk in stream:
@@ -224,56 +260,59 @@ for message in active_chat["messages"]:
                 for source in message["sources"]:
                     st.markdown(f"- [{source['title']}]({source['url']})")
 
-# VOICE INPUT (Feature Path B)
+# INPUT HANDLING
 audio_value = st.audio_input("🎙️ Record Voice Question")
-
-# TEXT INPUT
 prompt = st.chat_input("Ask about your PDF or the web...")
 
-# LOGIC: Handle Voice OR Text
 final_prompt = None
-
 if audio_value:
     with st.spinner("🎧 Transcribing..."):
         text = transcribe_audio(audio_value)
-        if text:
-            final_prompt = text
-            
+        if text: final_prompt = text
 if prompt:
     final_prompt = prompt
 
-# IF WE HAVE A PROMPT (Voice or Text)
-# IF WE HAVE A PROMPT (Voice or Text)
+# IF WE HAVE A PROMPT
 if final_prompt:
-    # --- BUG FIX: PREVENT DOUBLE-SUBMISSION ---
-    # Check if the last message in the chat is an answer to this EXACT same prompt.
+    
+    # 1. Prevent Double-Submission Bug
     if active_chat["messages"]:
         last_msg = active_chat["messages"][-1]
         if last_msg["role"] == "assistant":
-            # If we already have an answer, check if the question matches
             if len(active_chat["messages"]) >= 2:
                 last_user_msg = active_chat["messages"][-2]["content"]
                 if final_prompt == last_user_msg:
-                    st.stop() # STOP here. Do not process again.
-    # ------------------------------------------
+                    st.stop()
 
     with st.chat_message("user"):
         st.markdown(final_prompt)
     active_chat["messages"].append({"role": "user", "content": final_prompt})
     
-    # Rename silently (taking first 5 words)
     if len(active_chat["messages"]) == 1:
         st.session_state.all_chats[active_id]["title"] = " ".join(final_prompt.split()[:5]) + "..."
     
     with st.chat_message("assistant"):
         search_results = []
-        if deep_mode or not active_chat["doc_text"]:
+        doc_present = bool(active_chat["doc_text"])
+        
+        # --- NEW: THE ROUTER LOGIC ---
+        # 1. Ask the AI: "Is this chat or search?"
+        intent = classify_intent(final_prompt)
+        
+        # 2. Only search if Intent is SEARCH or Deep Mode is ON (or if Doc is present, we skip web unless asked)
+        should_search = (intent == "SEARCH" or deep_mode) and not doc_present
+        
+        # Override: If document is present, we usually don't need web unless specified. 
+        # But if deep_mode is ON, we force web search anyway.
+        
+        if should_search:
              if deep_mode:
                  search_results = search_web(final_prompt, True)
              else:
                  with st.spinner("🔎 Searching..."):
                      search_results = search_web(final_prompt, False)
         
+        # 3. Generate Answer
         full_response = st.write_stream(
             stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"])
         )
@@ -289,7 +328,5 @@ if final_prompt:
         "sources": search_results
     })
     
-    # Rerun to update sidebar title
     if len(active_chat["messages"]) == 2:
         st.rerun()
-
