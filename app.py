@@ -99,11 +99,10 @@ with st.sidebar:
     deep_mode = st.toggle("🚀 Deep Research", value=False)
     enable_voice = st.toggle("🔊 Hear AI Response", value=False)
     
-    # --- NEW: FLEXIBLE MODEL SELECTOR ---
-    # This allows you to fix the model name instantly if Groq changes it again.
+    # --- UPDATED DEFAULT MODEL ---
     vision_model_name = st.text_input(
         "Vision Model Name:", 
-        value="llama-3.2-90b-vision-preview", 
+        value="llama-3.2-11b-vision-preview", # CHANGED to the working 11b model
         help="If error 400 occurs, check console.groq.com/docs/models and paste the new name here."
     )
     
