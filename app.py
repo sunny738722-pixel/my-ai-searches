@@ -3,7 +3,8 @@ from groq import Groq
 from tavily import TavilyClient
 import uuid
 import json
-import PyPDF2 # The new tool for reading PDFs
+import PyPDF2
+from fpdf import FPDF
 
 # ------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
@@ -28,7 +29,6 @@ if "active_chat_id" not in st.session_state:
     st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": ""}
     st.session_state.active_chat_id = new_id
 
-# Helper to get active chat
 active_id = st.session_state.active_chat_id
 # Safety check
 if active_id not in st.session_state.all_chats:
@@ -41,48 +41,65 @@ active_chat = st.session_state.all_chats[active_id]
 with st.sidebar:
     st.title("🧠 Research Center")
     
-    # --- NEW FEATURE: DOCUMENT UPLOADER ---
+    # A. DOCUMENT UPLOADER
     st.markdown("### 📂 Knowledge Base")
-    uploaded_file = st.file_uploader("Upload a PDF to chat with it:", type="pdf")
-    
+    uploaded_file = st.file_uploader("Upload PDF:", type="pdf")
     if uploaded_file:
-        # Extract text from PDF
         try:
             reader = PyPDF2.PdfReader(uploaded_file)
             doc_text = ""
             for page in reader.pages:
                 doc_text += page.extract_text() + "\n"
-            
-            # Save to current chat memory
             st.session_state.all_chats[active_id]["doc_text"] = doc_text
             st.success(f"✅ Loaded: {uploaded_file.name}")
         except Exception as e:
             st.error(f"Error reading PDF: {e}")
 
-    if st.session_state.all_chats[active_id].get("doc_text"):
-        st.info("📄 Document Active: The AI will answer based on this file.")
-
     st.divider()
     
-    # Deep Mode Toggle
-    st.markdown("### 🕵️ Search Mode")
-    deep_mode = st.toggle("🚀 Deep Research", value=False, help="Enable for complex web searches.")
+    # B. SETTINGS
+    deep_mode = st.toggle("🚀 Deep Research", value=False)
     
     st.divider()
     
-    # Chat Controls
+    # C. CHAT CONTROLS
     if st.button("➕ New Discussion", use_container_width=True, type="primary"):
         new_id = str(uuid.uuid4())
         st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": ""}
         st.session_state.active_chat_id = new_id
         st.rerun()
 
-    # History
+    # D. EXPORT TO PDF (Feature Path C)
+    if st.button("📥 Download Chat as PDF"):
+        if active_chat["messages"]:
+            pdf = FPDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=12)
+            pdf.cell(200, 10, txt=f"Report: {active_chat['title']}", ln=True, align='C')
+            
+            for msg in active_chat["messages"]:
+                role = "User" if msg["role"] == "user" else "AI"
+                clean_content = msg["content"].encode('latin-1', 'replace').decode('latin-1')
+                pdf.set_font("Arial", 'B', 12)
+                pdf.cell(200, 10, txt=f"{role}:", ln=True)
+                pdf.set_font("Arial", size=10)
+                pdf.multi_cell(0, 10, txt=clean_content)
+                pdf.ln(5)
+                
+            pdf_bytes = pdf.output(dest='S').encode('latin-1')
+            st.download_button(
+                label="Click to Save PDF",
+                data=pdf_bytes,
+                file_name=f"research_report.pdf",
+                mime="application/pdf"
+            )
+        else:
+            st.warning("No chat history to export!")
+
     st.markdown("### 🗂️ History")
     for chat_id in reversed(list(st.session_state.all_chats.keys())):
         chat = st.session_state.all_chats[chat_id]
         is_active = (chat_id == st.session_state.active_chat_id)
-        
         col1, col2 = st.columns([0.85, 0.15]) 
         with col1:
             if st.button(f"📄 {chat['title']}", key=f"btn_{chat_id}", use_container_width=True, type="primary" if is_active else "secondary"):
@@ -110,9 +127,17 @@ except Exception:
 # ------------------------------------------------------------------
 # 5. LOGIC FUNCTIONS
 # ------------------------------------------------------------------
+def transcribe_audio(audio_bytes):
+    try:
+        return groq_client.audio.transcriptions.create(
+            file=("voice.wav", audio_bytes),
+            model="distil-whisper-large-v3-en",
+            response_format="text"
+        )
+    except Exception as e:
+        return None
 
 def generate_sub_queries(user_query):
-    # (Same as before)
     system_prompt = "You are a search expert. Return 3 search queries as a JSON list. Example: [\"q1\", \"q2\"]"
     try:
         response = groq_client.chat.completions.create(
@@ -126,7 +151,6 @@ def generate_sub_queries(user_query):
         return [user_query]
 
 def search_web(query, is_deep_mode):
-    # (Same as before)
     if is_deep_mode:
         with st.status("🕵️ Deep Research...", expanded=True) as status:
             sub_queries = generate_sub_queries(query)
@@ -138,7 +162,6 @@ def search_web(query, is_deep_mode):
                     final_results.extend(results)
                 except: continue
             
-            # Deduplicate
             seen = set()
             unique = []
             for r in final_results:
@@ -151,32 +174,26 @@ def search_web(query, is_deep_mode):
         return tavily_client.search(query, max_results=5).get("results", [])
 
 def stream_ai_answer(messages, search_results, doc_text):
-    # --- PROMPT ENGINEERING: THE LIBRARIAN ---
-    
-    # 1. Format Web Results
     web_context = ""
     if search_results:
         for i, r in enumerate(search_results):
             web_context += f"WEB SOURCE {i+1}: {r['title']} | {r['content']}\n"
             
-    # 2. Format Document Context
     doc_context = ""
     if doc_text:
-        doc_context = f"\n\n📂 UPLOADED DOCUMENT CONTENT:\n{doc_text[:30000]}..." # Limit to 30k chars to be safe
+        doc_context = f"\n\n📂 DOCUMENT CONTENT:\n{doc_text[:30000]}..."
 
-    # 3. Build the Master Prompt
     system_prompt = {
         "role": "system",
         "content": (
             "You are an expert research assistant."
-            "\n- If the user asks about the Uploaded Document, prioritize the content in '📂 UPLOADED DOCUMENT CONTENT'."
-            "\n- If the user asks a general question, use the 'WEB SOURCE' information."
-            "\n- Always cite your sources (e.g., [Page 2] or [Source 1])."
+            "\n- If the user asks about the Document, use '📂 DOCUMENT CONTENT'."
+            "\n- If general, use 'WEB SOURCE'."
+            "\n- Always cite sources."
             f"\n\n{web_context}"
             f"\n\n{doc_context}"
         )
     }
-    
     clean_history = [{"role": m["role"], "content": m["content"]} for m in messages]
     
     try:
@@ -202,33 +219,47 @@ for message in active_chat["messages"]:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if "sources" in message and message["sources"]:
-            with st.expander(f"📚 {len(message['sources'])} Web Sources"):
+            with st.expander(f"📚 {len(message['sources'])} Sources"):
                 for source in message["sources"]:
                     st.markdown(f"- [{source['title']}]({source['url']})")
 
-# Input Handling
-if prompt := st.chat_input("Ask about your PDF or the web..."):
+# VOICE INPUT (Feature Path B)
+audio_value = st.audio_input("🎙️ Record Voice Question")
+
+# TEXT INPUT
+prompt = st.chat_input("Ask about your PDF or the web...")
+
+# LOGIC: Handle Voice OR Text
+final_prompt = None
+
+if audio_value:
+    with st.spinner("🎧 Transcribing..."):
+        text = transcribe_audio(audio_value)
+        if text:
+            final_prompt = text
+            
+if prompt:
+    final_prompt = prompt
+
+# IF WE HAVE A PROMPT (Voice or Text)
+if final_prompt:
     
     with st.chat_message("user"):
-        st.markdown(prompt)
-    active_chat["messages"].append({"role": "user", "content": prompt})
+        st.markdown(final_prompt)
+    active_chat["messages"].append({"role": "user", "content": final_prompt})
     
-    # Rename silently
     if len(active_chat["messages"]) == 1:
-        st.session_state.all_chats[active_id]["title"] = " ".join(prompt.split()[:5]) + "..."
+        st.session_state.all_chats[active_id]["title"] = " ".join(final_prompt.split()[:5]) + "..."
     
     with st.chat_message("assistant"):
-        # 1. Decide if we need to search the web
-        # (If deep mode is ON, we always search. If OFF, we only search if no doc is present OR if prompt implies it)
         search_results = []
         if deep_mode or not active_chat["doc_text"]:
              if deep_mode:
-                 search_results = search_web(prompt, True)
+                 search_results = search_web(final_prompt, True)
              else:
                  with st.spinner("🔎 Searching..."):
-                     search_results = search_web(prompt, False)
+                     search_results = search_web(final_prompt, False)
         
-        # 2. Generate Answer (Injecting both Web + Doc context)
         full_response = st.write_stream(
             stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"])
         )
