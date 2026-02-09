@@ -2,22 +2,24 @@ import streamlit as st
 from groq import Groq
 from tavily import TavilyClient
 import uuid
+import json
 
 # ------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
 # ------------------------------------------------------------------
-st.set_page_config(page_title="Sunny's Pro AI", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="Sunny's Research AI", page_icon="🧠", layout="wide")
 
-# Custom CSS for a cleaner look
 st.markdown("""
 <style>
     .stChatInput {position: fixed; bottom: 20px;}
     .stChatMessage {padding: 1rem; border-radius: 10px; margin-bottom: 1rem;}
+    /* Make the status box look cool */
+    .stStatus {border: 1px solid #e0e0e0; border-radius: 10px; background: #f9f9f9;}
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
-# 2. SESSION STATE (Memory)
+# 2. SESSION STATE
 # ------------------------------------------------------------------
 if "all_chats" not in st.session_state:
     st.session_state.all_chats = {} 
@@ -27,20 +29,25 @@ if "active_chat_id" not in st.session_state:
     st.session_state.active_chat_id = new_id
 
 # ------------------------------------------------------------------
-# 3. SIDEBAR (Navigation)
+# 3. SIDEBAR
 # ------------------------------------------------------------------
 with st.sidebar:
-    st.title("🧠 Brain Control")
+    st.title("🧠 Research Center")
     
+    # 1. DEEP MODE TOGGLE (The New Feature)
+    st.markdown("### 🕵️ Search Mode")
+    deep_mode = st.toggle("🚀 Deep Research", value=False, help="Runs multiple searches for complex questions. Slower but smarter.")
+    
+    st.divider()
+    
+    # 2. CHAT CONTROLS
     if st.button("➕ New Discussion", use_container_width=True, type="primary"):
         new_id = str(uuid.uuid4())
         st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": []}
         st.session_state.active_chat_id = new_id
         st.rerun()
 
-    st.divider()
-    
-    # History List
+    st.markdown("### 🗂️ History")
     for chat_id in reversed(list(st.session_state.all_chats.keys())):
         chat = st.session_state.all_chats[chat_id]
         is_active = (chat_id == st.session_state.active_chat_id)
@@ -70,37 +77,98 @@ except Exception:
     st.stop()
 
 # ------------------------------------------------------------------
-# 5. SMART LOGIC (The Upgrade)
+# 5. SMART LOGIC (Deep Research)
 # ------------------------------------------------------------------
 
-def search_web(query):
+def generate_sub_queries(user_query):
+    """Asks the AI to break the user's question into 3 search terms"""
+    system_prompt = (
+        "You are a search engine expert. Break the user's question into 3 distinct, high-quality search queries "
+        "to gather comprehensive information. Return ONLY a JSON list of strings. "
+        "Example: [\"query 1\", \"query 2\", \"query 3\"]"
+    )
+    
     try:
-        # UPGRADE 1: Fetch 6 results instead of 3 (More Brain Food)
-        response = tavily_client.search(query, max_results=6)
-        results = response.get("results", [])
-        
-        # Create a rich context for the AI
-        context_text = ""
-        for i, result in enumerate(results):
-            context_text += f"SOURCE {i+1}: {result['title']} | URL: {result['url']} | CONTENT: {result['content']}\n\n"
-            
-        return context_text, results
+        response = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant", # Use fast model for this simple task
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_query}
+            ],
+            temperature=0,
+            response_format={"type": "json_object"}
+        )
+        # Parse the JSON response
+        json_data = json.loads(response.choices[0].message.content)
+        # Handle cases where the AI might use different keys
+        if "queries" in json_data:
+            return json_data["queries"]
+        elif "list" in json_data:
+            return json_data["list"]
+        else:
+            return list(json_data.values())[0] # Grab the first list found
     except:
-        return "", []
+        # Fallback if AI fails
+        return [user_query]
+
+def search_web(query, is_deep_mode):
+    """
+    Standard Mode: 1 Search
+    Deep Mode: 3 Searches (15+ results)
+    """
+    final_results = []
+    status_msg = st.empty() # Placeholder for updates
+    
+    if is_deep_mode:
+        # Step 1: Brainstorm
+        with st.status("🕵️ Deep Research in progress...", expanded=True) as status:
+            st.write("🤔 Breaking down the question...")
+            sub_queries = generate_sub_queries(query)
+            
+            # Step 2: Multi-Search
+            for q in sub_queries:
+                st.write(f"🔎 Searching: '{q}'...")
+                try:
+                    response = tavily_client.search(q, max_results=4)
+                    results = response.get("results", [])
+                    final_results.extend(results)
+                except:
+                    continue
+            
+            # Remove duplicates based on URL
+            seen_urls = set()
+            unique_results = []
+            for r in final_results:
+                if r['url'] not in seen_urls:
+                    unique_results.append(r)
+                    seen_urls.add(r['url'])
+            
+            st.write(f"📚 Analyzed {len(unique_results)} sources.")
+            status.update(label="✅ Deep Research Complete", state="complete", expanded=False)
+            final_results = unique_results
+            
+    else:
+        # Standard Mode (Fast)
+        response = tavily_client.search(query, max_results=5)
+        final_results = response.get("results", [])
+
+    # Format for AI
+    context_text = ""
+    for i, result in enumerate(final_results):
+        context_text += f"SOURCE {i+1}: {result['title']} | URL: {result['url']} | CONTENT: {result['content']}\n\n"
+        
+    return context_text, final_results
 
 def stream_ai_answer(messages, search_context):
-    # UPGRADE 2: The "Super Prompt"
-    # We tell it exactly HOW to be smart.
     system_prompt = {
         "role": "system",
         "content": (
-            "You are an expert research assistant. Your goal is to provide comprehensive, professional, and well-structured answers."
-            "\n\nGUIDELINES:"
-            "\n1. **Deep Analysis**: Do not just summarize. Explain 'why' and 'how'."
-            "\n2. **Structure**: Use **Bold Headers**, bullet points, and clear paragraphs."
-            "\n3. **Citations**: Always cite your sources using [1], [2], etc."
-            "\n4. **Objectivity**: If sources disagree, present both sides."
-            "\n5. **Directness**: Start with a direct answer to the user's question, then expand."
+            "You are a professional research assistant. "
+            "Using the extensive context provided, write a comprehensive, detailed answer. "
+            "\n- Use H2 and H3 headers to organize sections."
+            "\n- Use bullet points for readability."
+            "\n- Cite sources [1], [2] frequently."
+            "\n- Be objective and thorough."
             f"\n\nSEARCH CONTEXT:\n{search_context}"
         )
     }
@@ -108,11 +176,10 @@ def stream_ai_answer(messages, search_context):
     clean_history = [{"role": m["role"], "content": m["content"]} for m in messages]
     
     try:
-        # UPGRADE 3: Hardcoded to the Smartest Model (70b)
         stream = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile", # The PhD Model
+            model="llama-3.3-70b-versatile", # Always use the smart model
             messages=[system_prompt] + clean_history,
-            temperature=0.5, # Lower temperature = More factual/smart, less random
+            temperature=0.6,
             stream=True,
         )
         for chunk in stream:
@@ -139,32 +206,30 @@ for message in active_chat["messages"]:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if "sources" in message and message["sources"]:
-            with st.expander(f"📚 {len(message['sources'])} Sources Cited"):
+            with st.expander(f"📚 {len(message['sources'])} Sources"):
                 for source in message["sources"]:
                     st.markdown(f"- [{source['title']}]({source['url']})")
 
 # Input Handling
-if prompt := st.chat_input("Ask a complex question..."):
+if prompt := st.chat_input("Ask a question..."):
     
-    # 1. Show User Message
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.all_chats[active_id]["messages"].append({"role": "user", "content": prompt})
     
-    # 2. Rename Chat (Silently)
+    # Rename silently
     if len(active_chat["messages"]) == 1:
-        new_title = " ".join(prompt.split()[:5]) + "..." # Taking 5 words for better titles
-        st.session_state.all_chats[active_id]["title"] = new_title
+        st.session_state.all_chats[active_id]["title"] = " ".join(prompt.split()[:5]) + "..."
     
-    # 3. Generate Answer
     with st.chat_message("assistant"):
-        # We show a status container that updates as it works
-        with st.status("🧠 researching deeply...", expanded=True) as status:
-            st.write("🔎 Searching the web (6 sources)...")
-            search_context, sources = search_web(prompt)
-            st.write("🤔 Analyzing & Cross-referencing...")
-            status.update(label="✅ Research Complete", state="complete", expanded=False)
-        
+        # We pass the "deep_mode" toggle value to the search function
+        if not deep_mode:
+            with st.spinner("🔎 Searching..."):
+                search_context, sources = search_web(prompt, False)
+        else:
+            # Deep mode has its own spinner inside the function
+            search_context, sources = search_web(prompt, True)
+            
         full_response = st.write_stream(
             stream_ai_answer(st.session_state.all_chats[active_id]["messages"], search_context)
         )
@@ -174,13 +239,12 @@ if prompt := st.chat_input("Ask a complex question..."):
                 for source in sources:
                     st.markdown(f"- [{source['title']}]({source['url']})")
     
-    # 4. Save Answer
     st.session_state.all_chats[active_id]["messages"].append({
         "role": "assistant", 
         "content": full_response,
         "sources": sources
     })
     
-    # 5. Refresh Sidebar (Only on first message)
+    # Sidebar refresh
     if len(active_chat["messages"]) == 2:
         st.rerun()
