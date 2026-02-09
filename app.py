@@ -1,94 +1,112 @@
 import streamlit as st
 from groq import Groq
 from tavily import TavilyClient
+import uuid # For generating unique chat IDs
 
 # ------------------------------------------------------------------
-# 1. PAGE CONFIGURATION
+# 1. PAGE CONFIGURATION (v7 Style)
 # ------------------------------------------------------------------
 st.set_page_config(
     page_title="Sunny's AI",
     page_icon="🤖",
-    layout="wide"  # "Wide" layout uses more screen space
+    layout="wide"
 )
 
 # ------------------------------------------------------------------
-# 2. SIDEBAR (The Control Panel)
+# 2. SESSION STATE SETUP (The Multi-Chat Brain)
+# ------------------------------------------------------------------
+# Initialize the "Master List" of all chats if it doesn't exist
+if "all_chats" not in st.session_state:
+    st.session_state.all_chats = {} # Dictionary to store all convos
+
+# Initialize the "Current Chat ID" tracker
+if "active_chat_id" not in st.session_state:
+    new_id = str(uuid.uuid4())
+    st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": []}
+    st.session_state.active_chat_id = new_id
+
+# ------------------------------------------------------------------
+# 3. SIDEBAR (The Navigator)
 # ------------------------------------------------------------------
 with st.sidebar:
-    st.title("⚙️ Settings")
+    st.title("💬 Your Chats")
     
-    # Feature 1: Model Selector
-    st.markdown("### Choose your Brain")
+    # [BUTTON] Create New Chat
+    if st.button("➕ New Chat", use_container_width=True, type="primary"):
+        new_id = str(uuid.uuid4())
+        st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": []}
+        st.session_state.active_chat_id = new_id
+        st.rerun()
+
+    st.divider()
+    
+    # [LIST] Show Past Chats
+    # We loop through all saved chats and make a button for each
+    chat_ids = list(st.session_state.all_chats.keys())
+    
+    # Reverse so newest is at top
+    for chat_id in reversed(chat_ids):
+        chat_data = st.session_state.all_chats[chat_id]
+        
+        # Highlight the button if it's the active one
+        button_type = "primary" if chat_id == st.session_state.active_chat_id else "secondary"
+        
+        col1, col2 = st.columns([0.85, 0.15]) 
+        with col1:
+            if st.button(f"📝 {chat_data['title']}", key=f"btn_{chat_id}", use_container_width=True, type=button_type):
+                st.session_state.active_chat_id = chat_id
+                st.rerun()
+        with col2:
+            # Delete Button (Small 'x')
+            if st.button("❌", key=f"del_{chat_id}"):
+                del st.session_state.all_chats[chat_id]
+                # If we deleted the active chat, reset to a new one
+                if chat_id == st.session_state.active_chat_id:
+                    new_id = str(uuid.uuid4())
+                    st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": []}
+                    st.session_state.active_chat_id = new_id
+                st.rerun()
+
+    st.divider()
+    
+    # [SETTINGS] - Kept from v7.0
+    st.header("⚙️ Settings")
     selected_model = st.selectbox(
-        "Model:",
-        options=["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "mixtral-8x7b-32768"],
-        index=0, # Default to the fast one
-        help="70b is smarter but slower. 8b is fastest."
+        "AI Model:",
+        options=["llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
+        index=0
     )
-    
-    st.markdown("---")
-    
-    # Feature 2: Clear History Button
-    if st.button("🧹 Clear Chat History", type="primary"):
-        st.session_state.messages = []
-        st.rerun() # Refreshes the app instantly
-
-    st.markdown("---")
-    st.caption("Powered by Groq & Tavily")
 
 # ------------------------------------------------------------------
-# 3. LOAD API KEYS (Safety First)
+# 4. API KEYS & TOOLS
 # ------------------------------------------------------------------
 try:
-    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-    TAVILY_API_KEY = st.secrets["TAVILY_API_KEY"]
+    groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+    tavily_client = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
 except Exception:
-    st.error("🚨 Secrets are missing! Please add them in Streamlit Settings.")
+    st.error("🚨 API Keys missing! Check Streamlit Settings.")
     st.stop()
-
-# Initialize Tools
-try:
-    groq_client = Groq(api_key=GROQ_API_KEY)
-    tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
-except Exception as e:
-    st.error(f"❌ Connection Error: {e}")
-    st.stop()
-
-# ------------------------------------------------------------------
-# 4. CORE LOGIC (Search & Think)
-# ------------------------------------------------------------------
-if "messages" not in st.session_state:
-    st.session_state.messages = []
 
 def search_web(query):
-    """Searches the web and returns neat results"""
     try:
         response = tavily_client.search(query, max_results=3)
-        results = response.get("results", [])
-        context_text = ""
-        for i, result in enumerate(results):
-            context_text += f"SOURCE {i+1}: {result['title']} | URL: {result['url']} | CONTENT: {result['content']}\n\n"
-        return context_text, results
-    except Exception:
-        return "", []
+        return response.get("results", [])
+    except:
+        return []
 
 def stream_ai_answer(messages, search_context, model_name):
-    """Streams the answer using the SELECTED model"""
     system_prompt = {
         "role": "system",
         "content": (
             "You are a helpful assistant. Answer based on the SEARCH RESULTS provided."
-            "Always cite your sources."
             f"\n\nSEARCH RESULTS:\n{search_context}"
         )
     }
-    
-    # Clean history for Groq
     clean_history = [{"role": m["role"], "content": m["content"]} for m in messages]
     
     try:
         stream = groq_client.chat.completions.create(
-            model=model_name,  # <--- We use the variable here!
+            model=model_name,
             messages=[system_prompt] + clean_history,
             temperature=0.7,
             stream=True,
@@ -100,16 +118,19 @@ def stream_ai_answer(messages, search_context, model_name):
         yield f"❌ Error: {e}"
 
 # ------------------------------------------------------------------
-# 5. MAIN INTERFACE
+# 5. MAIN CHAT INTERFACE
 # ------------------------------------------------------------------
-st.title("🤖 Sunny's AI")
-st.caption(f"Running on: {selected_model}") # Shows which brain is active
+# Get the active chat data
+active_id = st.session_state.active_chat_id
+active_chat = st.session_state.all_chats[active_id]
 
-# Draw History
-for message in st.session_state.messages:
+st.title(f"🤖 {active_chat['title']}")
+
+# Draw History for THIS chat only
+for message in active_chat["messages"]:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        if "sources" in message:
+        if "sources" in message and message["sources"]:
             with st.expander("📚 Sources"):
                 for source in message["sources"]:
                     st.markdown(f"- [{source['title']}]({source['url']})")
@@ -117,25 +138,37 @@ for message in st.session_state.messages:
 # Input Box
 if prompt := st.chat_input("Ask me anything..."):
     
-    # User message
+    # 1. Update Title if it's the first message
+    if len(active_chat["messages"]) == 0:
+        # We take the first 4 words of the prompt as the title
+        title_words = prompt.split()[:4]
+        new_title = " ".join(title_words) + "..."
+        st.session_state.all_chats[active_id]["title"] = new_title
+        # Force rerun to update the sidebar title instantly
+        st.rerun()
+
+    # 2. Show User Message
     with st.chat_message("user"):
         st.markdown(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    # Save to SPECIFIC chat history
+    st.session_state.all_chats[active_id]["messages"].append({"role": "user", "content": prompt})
     
-    # Assistant message
+    # 3. AI Processing
     with st.chat_message("assistant"):
         with st.spinner("🔎 Searching..."):
             search_context, sources = search_web(prompt)
         
-        # We pass the 'selected_model' from the sidebar to the function
-        full_response = st.write_stream(stream_ai_answer(st.session_state.messages, search_context, selected_model))
+        full_response = st.write_stream(
+            stream_ai_answer(st.session_state.all_chats[active_id]["messages"], search_context, selected_model)
+        )
         
         if sources:
             with st.expander("📚 Sources Used"):
                 for source in sources:
                     st.markdown(f"- [{source['title']}]({source['url']})")
     
-    st.session_state.messages.append({
+    # Save Assistant Response to SPECIFIC chat history
+    st.session_state.all_chats[active_id]["messages"].append({
         "role": "assistant", 
         "content": full_response,
         "sources": sources
