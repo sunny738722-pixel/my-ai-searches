@@ -243,12 +243,25 @@ if prompt:
     final_prompt = prompt
 
 # IF WE HAVE A PROMPT (Voice or Text)
+# IF WE HAVE A PROMPT (Voice or Text)
 if final_prompt:
-    
+    # --- BUG FIX: PREVENT DOUBLE-SUBMISSION ---
+    # Check if the last message in the chat is an answer to this EXACT same prompt.
+    if active_chat["messages"]:
+        last_msg = active_chat["messages"][-1]
+        if last_msg["role"] == "assistant":
+            # If we already have an answer, check if the question matches
+            if len(active_chat["messages"]) >= 2:
+                last_user_msg = active_chat["messages"][-2]["content"]
+                if final_prompt == last_user_msg:
+                    st.stop() # STOP here. Do not process again.
+    # ------------------------------------------
+
     with st.chat_message("user"):
         st.markdown(final_prompt)
     active_chat["messages"].append({"role": "user", "content": final_prompt})
     
+    # Rename silently (taking first 5 words)
     if len(active_chat["messages"]) == 1:
         st.session_state.all_chats[active_id]["title"] = " ".join(final_prompt.split()[:5]) + "..."
     
@@ -276,6 +289,7 @@ if final_prompt:
         "sources": search_results
     })
     
+    # Rerun to update sidebar title
     if len(active_chat["messages"]) == 2:
         st.rerun()
 
