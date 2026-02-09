@@ -5,6 +5,8 @@ import uuid
 import json
 import PyPDF2
 from fpdf import FPDF
+import pandas as pd
+import re
 
 # ------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
@@ -26,12 +28,18 @@ if "all_chats" not in st.session_state:
     st.session_state.all_chats = {} 
 if "active_chat_id" not in st.session_state:
     new_id = str(uuid.uuid4())
-    st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": ""}
+    st.session_state.all_chats[new_id] = {
+        "title": "New Chat", 
+        "messages": [], 
+        "doc_text": "", 
+        "dataframe": None,
+        "file_name": ""
+    }
     st.session_state.active_chat_id = new_id
 
 active_id = st.session_state.active_chat_id
 if active_id not in st.session_state.all_chats:
-    st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": ""}
+    st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None}
 active_chat = st.session_state.all_chats[active_id]
 
 # ------------------------------------------------------------------
@@ -40,79 +48,73 @@ active_chat = st.session_state.all_chats[active_id]
 with st.sidebar:
     st.title("🧠 Research Center")
     
-    # A. DOCUMENT UPLOADER
-    st.markdown("### 📂 Knowledge Base")
-    uploaded_file = st.file_uploader("Upload PDF:", type="pdf")
-    if uploaded_file:
+    # A. DATA ANALYST (Path A)
+    st.markdown("### 📊 Data Analyst")
+    uploaded_csv = st.file_uploader("Upload CSV or Excel:", type=["csv", "xlsx"])
+    
+    if uploaded_csv:
         try:
-            reader = PyPDF2.PdfReader(uploaded_file)
+            if uploaded_csv.name.endswith('.csv'):
+                df = pd.read_csv(uploaded_csv)
+            else:
+                df = pd.read_excel(uploaded_csv)
+            
+            st.session_state.all_chats[active_id]["dataframe"] = df
+            st.session_state.all_chats[active_id]["file_name"] = uploaded_csv.name
+            st.success(f"✅ Loaded Data: {uploaded_csv.name} ({len(df)} rows)")
+        except Exception as e:
+            st.error(f"Error reading data: {e}")
+
+    # B. LIBRARIAN (PDF)
+    st.markdown("### 📂 Document Reader")
+    uploaded_pdf = st.file_uploader("Upload PDF:", type="pdf")
+    if uploaded_pdf:
+        try:
+            reader = PyPDF2.PdfReader(uploaded_pdf)
             doc_text = ""
             for page in reader.pages:
                 doc_text += page.extract_text() + "\n"
             st.session_state.all_chats[active_id]["doc_text"] = doc_text
-            st.success(f"✅ Loaded: {uploaded_file.name}")
+            st.success(f"✅ Loaded PDF: {uploaded_pdf.name}")
         except Exception as e:
             st.error(f"Error reading PDF: {e}")
 
     st.divider()
     
-    # B. SETTINGS
+    # SETTINGS
     deep_mode = st.toggle("🚀 Deep Research", value=False)
     
-    st.divider()
-    
-    # C. CHAT CONTROLS
-    if st.button("➕ New Discussion", use_container_width=True, type="primary"):
-        new_id = str(uuid.uuid4())
-        st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": ""}
-        st.session_state.active_chat_id = new_id
-        st.rerun()
-
-    # D. EXPORT TO PDF
-    if st.button("📥 Download Chat as PDF"):
+    # EXPORT
+    if st.button("📥 Download Chat PDF"):
         if active_chat["messages"]:
             pdf = FPDF()
             pdf.add_page()
             pdf.set_font("Arial", size=12)
             pdf.cell(200, 10, txt=f"Report: {active_chat['title']}", ln=True, align='C')
-            
             for msg in active_chat["messages"]:
                 role = "User" if msg["role"] == "user" else "AI"
-                # Handle unicode issues for PDF
                 clean_content = msg["content"].encode('latin-1', 'replace').decode('latin-1')
                 pdf.set_font("Arial", 'B', 12)
                 pdf.cell(200, 10, txt=f"{role}:", ln=True)
                 pdf.set_font("Arial", size=10)
                 pdf.multi_cell(0, 10, txt=clean_content)
                 pdf.ln(5)
-                
-            pdf_bytes = pdf.output(dest='S').encode('latin-1')
-            st.download_button(
-                label="Click to Save PDF",
-                data=pdf_bytes,
-                file_name=f"research_report.pdf",
-                mime="application/pdf"
-            )
-        else:
-            st.warning("No chat history to export!")
+            st.download_button("Click to Save PDF", data=pdf.output(dest='S').encode('latin-1'), file_name="report.pdf")
+
+    # NEW CHAT & HISTORY
+    if st.button("➕ New Discussion", use_container_width=True, type="primary"):
+        new_id = str(uuid.uuid4())
+        st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None}
+        st.session_state.active_chat_id = new_id
+        st.rerun()
 
     st.markdown("### 🗂️ History")
     for chat_id in reversed(list(st.session_state.all_chats.keys())):
         chat = st.session_state.all_chats[chat_id]
         is_active = (chat_id == st.session_state.active_chat_id)
-        col1, col2 = st.columns([0.85, 0.15]) 
-        with col1:
-            if st.button(f"📄 {chat['title']}", key=f"btn_{chat_id}", use_container_width=True, type="primary" if is_active else "secondary"):
-                st.session_state.active_chat_id = chat_id
-                st.rerun()
-        with col2:
-            if st.button("❌", key=f"del_{chat_id}"):
-                del st.session_state.all_chats[chat_id]
-                if chat_id == st.session_state.active_chat_id:
-                    new_id = str(uuid.uuid4())
-                    st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": ""}
-                    st.session_state.active_chat_id = new_id
-                st.rerun()
+        if st.button(f"📄 {chat['title']}", key=f"btn_{chat_id}", use_container_width=True, type="primary" if is_active else "secondary"):
+            st.session_state.active_chat_id = chat_id
+            st.rerun()
 
 # ------------------------------------------------------------------
 # 4. API KEYS
@@ -130,114 +132,67 @@ except Exception:
 def transcribe_audio(audio_bytes):
     try:
         audio_bytes.seek(0)
-        return groq_client.audio.transcriptions.create(
-            file=("voice.wav", audio_bytes),
-            model="whisper-large-v3", 
-            response_format="text"
-        )
-    except Exception as e:
-        st.error(f"❌ Audio Error: {e}")
-        return None
+        return groq_client.audio.transcriptions.create(file=("voice.wav", audio_bytes), model="whisper-large-v3", response_format="text")
+    except: return None
 
-def classify_intent(user_query):
-    """
-    Decides if the user wants to CHAT or SEARCH.
-    Returns: 'SEARCH' or 'CHAT'
-    """
-    system_prompt = (
-        "You are an intent classifier. Analyze the user's input."
-        "\n- If it requires facts, news, data, or research -> Return 'SEARCH'."
-        "\n- If it is casual conversation, greetings, personal feelings, or creative writing -> Return 'CHAT'."
-        "\n- Return ONLY the word 'SEARCH' or 'CHAT'. Do not explain."
-    )
-    
+def classify_intent(user_query, has_data=False):
+    # If we have data, we prioritize DATA analysis
+    if has_data:
+        if "plot" in user_query.lower() or "chart" in user_query.lower() or "graph" in user_query.lower():
+            return "PLOT"
+        if "analyze" in user_query.lower() or "summary" in user_query.lower():
+            return "ANALYZE"
+            
+    system_prompt = "Classify intent: 'SEARCH' (facts/news), 'CHAT' (casual). Return ONLY word."
     try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant", # Fast model for quick decision
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_query}
-            ],
-            temperature=0,
-            max_tokens=10
-        )
-        return response.choices[0].message.content.strip().upper()
-    except:
-        return "SEARCH" # Default to search if error
-
-def generate_sub_queries(user_query):
-    system_prompt = "You are a search expert. Return 3 search queries as a JSON list. Example: [\"q1\", \"q2\"]"
-    try:
-        response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_query}],
-            temperature=0, response_format={"type": "json_object"}
-        )
-        json_data = json.loads(response.choices[0].message.content)
-        return list(json_data.values())[0]
-    except:
-        return [user_query]
+        resp = groq_client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_query}], max_tokens=10)
+        return resp.choices[0].message.content.strip().upper()
+    except: return "SEARCH"
 
 def search_web(query, is_deep_mode):
-    if is_deep_mode:
-        with st.status("🕵️ Deep Research...", expanded=True) as status:
-            sub_queries = generate_sub_queries(query)
-            final_results = []
-            for q in sub_queries:
-                st.write(f"🔎 Searching: '{q}'...")
-                try:
-                    results = tavily_client.search(q, max_results=3).get("results", [])
-                    final_results.extend(results)
-                except: continue
-            
-            seen = set()
-            unique = []
-            for r in final_results:
-                if r['url'] not in seen:
-                    unique.append(r)
-                    seen.add(r['url'])
-            status.update(label="✅ Research Complete", state="complete", expanded=False)
-            return unique
-    else:
-        return tavily_client.search(query, max_results=5).get("results", [])
+    if is_deep_mode: return tavily_client.search(query, max_results=5).get("results", []) # Simplified for brevity
+    return tavily_client.search(query, max_results=3).get("results", [])
 
-def stream_ai_answer(messages, search_results, doc_text):
-    web_context = ""
+def execute_python_code(code, df):
+    """
+    Executes AI-generated Python code safely.
+    The code has access to: 'pd', 'st', 'df'
+    """
+    local_vars = {"pd": pd, "st": st, "df": df}
+    try:
+        exec(code, {}, local_vars)
+        return "✅ Code Executed Successfully"
+    except Exception as e:
+        return f"❌ Code Error: {e}"
+
+def stream_ai_answer(messages, search_results, doc_text, df):
+    # 1. Build Context
+    context = ""
     if search_results:
-        for i, r in enumerate(search_results):
-            web_context += f"WEB SOURCE {i+1}: {r['title']} | {r['content']}\n"
-            
-    doc_context = ""
+        context += "\nWEB SOURCES:\n" + "\n".join([f"- {r['title']}: {r['content']}" for r in search_results])
     if doc_text:
-        doc_context = f"\n\n📂 DOCUMENT CONTENT:\n{doc_text[:30000]}..."
+        context += f"\n\nDOCUMENT CONTEXT:\n{doc_text[:20000]}..."
+    if df is not None:
+        context += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
+        context += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ``` blocks. Use 'st.bar_chart(df)', 'st.line_chart(df)', or 'st.write(df)'. Do NOT use plt.show()."
 
-    # NEW: Adjust prompt based on whether we have sources or not
-    if not web_context and not doc_context:
-        # Chat Mode Prompt
-        system_prompt_text = (
-            "You are a friendly and helpful AI assistant named Sunny's AI. "
-            "Engage in casual conversation. Be empathetic, funny, or professional depending on the tone. "
-            "Do NOT mention 'search results' or 'sources'."
+    system_prompt = {
+        "role": "system",
+        "content": (
+            "You are a helpful AI Assistant. "
+            "Use the provided context to answer. "
+            "If writing code, keep it simple and use Streamlit functions."
+            f"{context}"
         )
-    else:
-        # Search Mode Prompt
-        system_prompt_text = (
-            "You are an expert research assistant."
-            "\n- If the user asks about the Document, use '📂 DOCUMENT CONTENT'."
-            "\n- If general, use 'WEB SOURCE'."
-            "\n- Always cite sources."
-            f"\n\n{web_context}"
-            f"\n\n{doc_context}"
-        )
-
-    system_prompt = {"role": "system", "content": system_prompt_text}
+    }
+    
     clean_history = [{"role": m["role"], "content": m["content"]} for m in messages]
     
     try:
         stream = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[system_prompt] + clean_history,
-            temperature=0.7,
+            temperature=0.5,
             stream=True,
         )
         for chunk in stream:
@@ -251,38 +206,33 @@ def stream_ai_answer(messages, search_results, doc_text):
 # ------------------------------------------------------------------
 st.title(f"{active_chat['title']}")
 
-# Display History
-for message in active_chat["messages"]:
+# Display History (and Charts!)
+for i, message in enumerate(active_chat["messages"]):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        if "sources" in message and message["sources"]:
-            with st.expander(f"📚 {len(message['sources'])} Sources"):
-                for source in message["sources"]:
-                    st.markdown(f"- [{source['title']}]({source['url']})")
+        
+        # Check for saved charts/code execution in history
+        if "code_ran" in message and active_chat["dataframe"] is not None:
+            with st.expander("📊 Analysis Output"):
+                execute_python_code(message["code_ran"], active_chat["dataframe"])
 
-# INPUT HANDLING
-audio_value = st.audio_input("🎙️ Record Voice Question")
-prompt = st.chat_input("Ask about your PDF or the web...")
-
+# Input
+audio_value = st.audio_input("🎙️")
+prompt = st.chat_input("Ask about data, docs, or web...")
 final_prompt = None
+
 if audio_value:
-    with st.spinner("🎧 Transcribing..."):
-        text = transcribe_audio(audio_value)
-        if text: final_prompt = text
+    with st.spinner("Transcribing..."):
+        final_prompt = transcribe_audio(audio_value)
 if prompt:
     final_prompt = prompt
 
-# IF WE HAVE A PROMPT
 if final_prompt:
-    
-    # 1. Prevent Double-Submission Bug
+    # Double-submission check
     if active_chat["messages"]:
-        last_msg = active_chat["messages"][-1]
-        if last_msg["role"] == "assistant":
-            if len(active_chat["messages"]) >= 2:
-                last_user_msg = active_chat["messages"][-2]["content"]
-                if final_prompt == last_user_msg:
-                    st.stop()
+        if active_chat["messages"][-1]["role"] == "assistant":
+            if len(active_chat["messages"]) >= 2 and final_prompt == active_chat["messages"][-2]["content"]:
+                st.stop()
 
     with st.chat_message("user"):
         st.markdown(final_prompt)
@@ -290,43 +240,40 @@ if final_prompt:
     
     if len(active_chat["messages"]) == 1:
         st.session_state.all_chats[active_id]["title"] = " ".join(final_prompt.split()[:5]) + "..."
-    
+
+    # LOGIC: Decide what to do
     with st.chat_message("assistant"):
+        df = active_chat["dataframe"]
+        intent = classify_intent(final_prompt, has_data=(df is not None))
+        
         search_results = []
-        doc_present = bool(active_chat["doc_text"])
+        if intent == "SEARCH" or (deep_mode and not df and not active_chat["doc_text"]):
+            with st.spinner("Searching..."):
+                search_results = search_web(final_prompt, deep_mode)
         
-        # --- NEW: THE ROUTER LOGIC ---
-        # 1. Ask the AI: "Is this chat or search?"
-        intent = classify_intent(final_prompt)
-        
-        # 2. Only search if Intent is SEARCH or Deep Mode is ON (or if Doc is present, we skip web unless asked)
-        should_search = (intent == "SEARCH" or deep_mode) and not doc_present
-        
-        # Override: If document is present, we usually don't need web unless specified. 
-        # But if deep_mode is ON, we force web search anyway.
-        
-        if should_search:
-             if deep_mode:
-                 search_results = search_web(final_prompt, True)
-             else:
-                 with st.spinner("🔎 Searching..."):
-                     search_results = search_web(final_prompt, False)
-        
-        # 3. Generate Answer
+        # Stream Response
         full_response = st.write_stream(
-            stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"])
+            stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"], df)
         )
         
-        if search_results:
-            with st.expander("📚 Sources Used"):
-                for source in search_results:
-                    st.markdown(f"- [{source['title']}]({source['url']})")
-    
-    active_chat["messages"].append({
-        "role": "assistant", 
-        "content": full_response,
-        "sources": search_results
-    })
+        # CODE EXECUTION LOGIC (The "Analyst" Magic)
+        code_block = None
+        if df is not None:
+            # Look for python code in the response
+            match = re.search(r"```python(.*?)```", full_response, re.DOTALL)
+            if match:
+                code_block = match.group(1).strip()
+                st.markdown("### 📊 Generating Chart...")
+                result = execute_python_code(code_block, df)
+                if "Error" in result:
+                    st.error(result)
+        
+    # Save message
+    msg_data = {"role": "assistant", "content": full_response, "sources": search_results}
+    if code_block:
+        msg_data["code_ran"] = code_block # Save the code so we can re-run it when history loads
+        
+    active_chat["messages"].append(msg_data)
     
     if len(active_chat["messages"]) == 2:
         st.rerun()
