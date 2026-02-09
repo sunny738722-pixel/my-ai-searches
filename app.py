@@ -10,6 +10,7 @@ import re
 from gtts import gTTS
 import tempfile
 import os
+import requests # New library for Pro Image Generation
 
 # ------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
@@ -119,13 +120,14 @@ with st.sidebar:
             st.rerun()
 
 # ------------------------------------------------------------------
-# 4. API KEYS
+# 4. API KEYS (NOW INCLUDING HUGGING FACE)
 # ------------------------------------------------------------------
 try:
     groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
     tavily_client = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
+    HF_TOKEN = st.secrets["HF_TOKEN"] # Pro Image Key
 except Exception:
-    st.error("🚨 API Keys missing! Check Streamlit Settings.")
+    st.error("🚨 API Keys missing! Check Streamlit Settings (GROQ, TAVILY, or HF_TOKEN).")
     st.stop()
 
 # ------------------------------------------------------------------
@@ -140,18 +142,17 @@ def transcribe_audio(audio_bytes):
 def classify_intent(user_query, has_data=False):
     uq_lower = user_query.lower()
     
-    # 1. SUPER AGGRESSIVE IMAGE CHECK
-    # If the user says any of these, we FORCE image mode.
+    # 1. IMAGE CHECK
     image_triggers = ["generate image", "create image", "image of", "draw a", "paint a", "sketch a", "picture of"]
     if any(trigger in uq_lower for trigger in image_triggers):
         return "IMAGE"
     
-    # 2. Data Check
+    # 2. DATA CHECK
     if has_data:
         if any(w in uq_lower for w in ["plot", "chart", "graph"]): return "PLOT"
         if any(w in uq_lower for w in ["analyze", "summary"]): return "ANALYZE"
     
-    # 3. Fallback to LLM for subtle cases
+    # 3. GENERAL CHECK
     system_prompt = "Classify intent: 'SEARCH' (facts/news), 'CHAT' (casual). Return ONLY word."
     try:
         resp = groq_client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_query}], max_tokens=10)
@@ -181,9 +182,21 @@ def generate_audio(text):
     except: return None
 
 def generate_image(prompt):
-    # Pollinations AI (No Key Needed)
-    clean_prompt = prompt.replace(" ", "%20")
-    return f"https://image.pollinations.ai/prompt/{clean_prompt}"
+    """
+    Generates an image using Hugging Face's Stable Diffusion XL model.
+    This is PRO tier (API Key based) so it won't hit anonymous rate limits.
+    """
+    API_URL = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    
+    try:
+        response = requests.post(API_URL, headers=headers, json={"inputs": prompt})
+        if response.status_code == 200:
+            return response.content # Returns raw image bytes
+        else:
+            return None
+    except:
+        return None
 
 def stream_ai_answer(messages, search_results, doc_text, df):
     context = ""
@@ -221,7 +234,7 @@ def stream_ai_answer(messages, search_results, doc_text, df):
 st.title(f"{active_chat['title']}")
 
 # Display History
-for message in active_chat["messages"]:
+for i, message in enumerate(active_chat["messages"]):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         
@@ -230,9 +243,9 @@ for message in active_chat["messages"]:
             with st.expander("📊 Analysis Output"):
                 execute_python_code(message["code_ran"], active_chat["dataframe"])
         
-        # Show Images
-        if "image_url" in message:
-            st.image(message["image_url"], caption="Generated Image")
+        # Show Images (Bytes Logic Updated)
+        if "image_bytes" in message:
+            st.image(message["image_bytes"], caption="Generated Art")
         
         # Show Audio
         if "audio_file" in message:
@@ -250,7 +263,6 @@ if prompt:
     final_prompt = prompt
 
 if final_prompt:
-    # 1. Double Submission Check
     if active_chat["messages"]:
         if active_chat["messages"][-1]["role"] == "assistant":
             if len(active_chat["messages"]) >= 2 and final_prompt == active_chat["messages"][-2]["content"]:
@@ -260,7 +272,6 @@ if final_prompt:
         st.markdown(final_prompt)
     active_chat["messages"].append({"role": "user", "content": final_prompt})
     
-    # 2. Update Title (Fixed Typo Here!)
     if len(active_chat["messages"]) == 1:
         st.session_state.all_chats[active_id]["title"] = " ".join(final_prompt.split()[:5]) + "..."
 
@@ -268,23 +279,26 @@ if final_prompt:
         df = active_chat["dataframe"]
         intent = classify_intent(final_prompt, has_data=(df is not None))
         
-        # DEBUG MESSAGE (REMOVE LATER IF YOU WANT)
-        st.toast(f"Detected Intent: {intent}")
+        st.toast(f"Intent: {intent}")
         
-        # --- PATH 1: IMAGE GENERATION ---
+        # --- IMAGE GENERATION (PRO MODE) ---
         if intent == "IMAGE":
-            with st.spinner("🎨 Painting your imagination..."):
-                image_url = generate_image(final_prompt)
-                st.image(image_url, caption=final_prompt)
-                full_response = f"Here is the image for: {final_prompt}"
+            with st.spinner("🎨 Generating Art (HD)..."):
+                image_bytes = generate_image(final_prompt)
                 
-                active_chat["messages"].append({
-                    "role": "assistant", 
-                    "content": full_response, 
-                    "image_url": image_url
-                })
+                if image_bytes:
+                    st.image(image_bytes, caption=final_prompt)
+                    full_response = f"Here is the generated image for: {final_prompt}"
+                    
+                    active_chat["messages"].append({
+                        "role": "assistant", 
+                        "content": full_response, 
+                        "image_bytes": image_bytes # Save bytes, not URL
+                    })
+                else:
+                    st.error("❌ Failed to generate image. Check HF_TOKEN.")
         
-        # --- PATH 2: STANDARD AI ---
+        # --- STANDARD PATH ---
         else:
             search_results = []
             if intent == "SEARCH" or (deep_mode and not df and not active_chat["doc_text"]):
@@ -313,13 +327,11 @@ if final_prompt:
                     if audio_file:
                         st.audio(audio_file, format="audio/mp3")
 
-            # Save Message
             msg_data = {"role": "assistant", "content": full_response, "sources": search_results}
             if code_block: msg_data["code_ran"] = code_block
             if audio_file: msg_data["audio_file"] = audio_file
             
             active_chat["messages"].append(msg_data)
             
-            # Rerun for standard path
             if len(active_chat["messages"]) == 2:
                 st.rerun()
