@@ -11,6 +11,7 @@ from gtts import gTTS
 import tempfile
 import os
 import requests
+import base64
 
 # ------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
@@ -37,14 +38,14 @@ if "active_chat_id" not in st.session_state:
         "messages": [], 
         "doc_text": "", 
         "dataframe": None,
-        "file_name": ""
+        "image_data": None # New: Store image base64
     }
     st.session_state.active_chat_id = new_id
 
 active_id = st.session_state.active_chat_id
 # Safety check
 if active_id not in st.session_state.all_chats:
-    st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None}
+    st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None, "image_data": None}
 active_chat = st.session_state.all_chats[active_id]
 
 # ------------------------------------------------------------------
@@ -63,7 +64,6 @@ with st.sidebar:
             else:
                 df = pd.read_excel(uploaded_csv)
             st.session_state.all_chats[active_id]["dataframe"] = df
-            st.session_state.all_chats[active_id]["file_name"] = uploaded_csv.name
             st.success(f"✅ Loaded Data: {uploaded_csv.name} ({len(df)} rows)")
         except Exception as e:
             st.error(f"Error reading data: {e}")
@@ -81,6 +81,17 @@ with st.sidebar:
             st.success(f"✅ Loaded PDF: {uploaded_pdf.name}")
         except Exception as e:
             st.error(f"Error reading PDF: {e}")
+
+    # C. VISION (NEW) 👁️
+    st.markdown("### 👁️ Vision Eye")
+    uploaded_img = st.file_uploader("Upload Image:", type=["jpg", "jpeg", "png"])
+    if uploaded_img:
+        # Convert to Base64 immediately
+        bytes_data = uploaded_img.getvalue()
+        base64_image = base64.b64encode(bytes_data).decode('utf-8')
+        st.session_state.all_chats[active_id]["image_data"] = base64_image
+        st.success(f"✅ Loaded Image: {uploaded_img.name}")
+        st.image(uploaded_img, caption="Vision Context Active", use_container_width=True)
 
     st.divider()
     
@@ -108,7 +119,7 @@ with st.sidebar:
     # HISTORY CONTROLS
     if st.button("➕ New Discussion", use_container_width=True, type="primary"):
         new_id = str(uuid.uuid4())
-        st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None}
+        st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None, "image_data": None}
         st.session_state.active_chat_id = new_id
         st.rerun()
 
@@ -142,18 +153,11 @@ def transcribe_audio(audio_bytes):
 
 def classify_intent(user_query, has_data=False):
     uq_lower = user_query.lower()
-    
-    # 1. IMAGE CHECK
     image_triggers = ["generate image", "create image", "image of", "draw a", "paint a", "sketch a", "picture of"]
-    if any(trigger in uq_lower for trigger in image_triggers):
-        return "IMAGE"
-    
-    # 2. DATA CHECK
+    if any(trigger in uq_lower for trigger in image_triggers): return "IMAGE"
     if has_data:
         if any(w in uq_lower for w in ["plot", "chart", "graph"]): return "PLOT"
         if any(w in uq_lower for w in ["analyze", "summary"]): return "ANALYZE"
-    
-    # 3. GENERAL CHECK
     system_prompt = "Classify intent: 'SEARCH' (facts/news), 'CHAT' (casual). Return ONLY word."
     try:
         resp = groq_client.chat.completions.create(model="llama-3.1-8b-instant", messages=[{"role":"system","content":system_prompt},{"role":"user","content":user_query}], max_tokens=10)
@@ -173,30 +177,13 @@ def execute_python_code(code, df):
         return f"❌ Code Error: {e}"
 
 def generate_audio(text):
-    """
-    Cleaner Audio Generation:
-    Removes Markdown (*, #, `), links, and underscores so the voice 
-    sounds natural and doesn't read special characters.
-    """
     try:
-        # 1. Remove Markdown (*, #, `)
-        clean_text = re.sub(r'[\*#`]', '', text)
-        
-        # 2. Remove Web Links (http...)
-        clean_text = re.sub(r'http\S+', '', clean_text)
-        
-        # 3. Remove long lines (_______) and dashes
-        clean_text = re.sub(r'[-_]{2,}', ' ', clean_text)
-        
-        # 4. Remove single underscores (often read as "underscore")
+        clean_text = re.sub(r'[\*#`]', '', text) # Remove Markdown
+        clean_text = re.sub(r'http\S+', '', clean_text) # Remove Links
+        clean_text = re.sub(r'[-_]{2,}', ' ', clean_text) # Remove separators
         clean_text = clean_text.replace("_", " ")
-        
-        # 5. Fix extra spaces
         clean_text = " ".join(clean_text.split())
-
-        # Limit to 1000 chars for speed
         if len(clean_text) > 1000: clean_text = clean_text[:1000] + "..."
-        
         tts = gTTS(text=clean_text, lang='en')
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
             tts.save(fp.name)
@@ -204,43 +191,58 @@ def generate_audio(text):
     except: return None
 
 def generate_image(prompt):
-    # Pro Mode (Hugging Face)
     API_URL = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-xl-base-1.0"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-
     try:
         response = requests.post(API_URL, headers=headers, json={"inputs": prompt})
-        if response.status_code == 200:
-            return response.content
+        if response.status_code == 200: return response.content
         else:
-            # Fallback to Pollinations
             clean_prompt = prompt.replace(" ", "%20")
             return f"https://image.pollinations.ai/prompt/{clean_prompt}"
     except:
         clean_prompt = prompt.replace(" ", "%20")
         return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
-def stream_ai_answer(messages, search_results, doc_text, df):
-    context = ""
+def stream_ai_answer(messages, search_results, doc_text, df, image_data):
+    # 1. Context Building
+    context_text = ""
     if search_results:
-        context += "\nWEB SOURCES:\n" + "\n".join([f"- {r['title']}: {r['content']}" for r in search_results])
+        context_text += "\nWEB SOURCES:\n" + "\n".join([f"- {r['title']}: {r['content']}" for r in search_results])
     if doc_text:
-        context += f"\n\nDOCUMENT CONTEXT:\n{doc_text[:20000]}..."
+        context_text += f"\n\nDOCUMENT CONTEXT:\n{doc_text[:20000]}..."
     if df is not None:
-        context += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
-        context += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```."
+        context_text += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
+        context_text += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```."
 
-    system_prompt = {
-        "role": "system", 
-        "content": f"You are a helpful AI Assistant. Use context to answer. {context}"
-    }
+    # 2. Model Selection Logic
+    # If we have an image, we MUST use the Vision model (Llama 3.2 90b Vision)
+    if image_data:
+        model = "llama-3.2-90b-vision-preview" 
+        system_content = f"You are a helpful AI Assistant. Analyze the image provided. Use this context if available: {context_text}"
+        
+        # Structure for Vision Model
+        user_message_content = [
+            {"type": "text", "text": messages[-1]["content"]},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
+        ]
+        
+        # We need to construct a fresh history for the vision model call to avoid format conflicts
+        # For simplicity in this version, we send the System Prompt + The Current User Question with Image
+        final_messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_message_content}
+        ]
     
-    clean_history = [{"role": m["role"], "content": m["content"]} for m in messages]
-    
+    else:
+        # Standard Text Model
+        model = "llama-3.3-70b-versatile"
+        system_content = f"You are a helpful AI Assistant. Use context to answer. {context_text}"
+        final_messages = [{"role": "system", "content": system_content}] + [{"role": m["role"], "content": m["content"]} for m in messages]
+
     try:
         stream = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[system_prompt] + clean_history,
+            model=model,
+            messages=final_messages,
             temperature=0.5,
             stream=True,
         )
@@ -260,24 +262,19 @@ for i, message in enumerate(active_chat["messages"]):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         
-        # Show Charts
         if "code_ran" in message and active_chat["dataframe"] is not None:
             with st.expander("📊 Analysis Output"):
                 execute_python_code(message["code_ran"], active_chat["dataframe"])
-        
-        # Show Images
         if "image_bytes" in message:
             st.image(message["image_bytes"], caption="Generated Art")
         if "image_url" in message:
             st.image(message["image_url"], caption="Generated Art")
-        
-        # Show Audio
         if "audio_file" in message:
              st.audio(message["audio_file"], format="audio/mp3")
 
 # Input
 audio_value = st.audio_input("🎙️")
-prompt = st.chat_input("Ask anything or say 'Generate image of...'")
+prompt = st.chat_input("Ask anything, upload image/pdf, or say 'Generate image of...'")
 final_prompt = None
 
 if audio_value:
@@ -301,37 +298,31 @@ if final_prompt:
 
     with st.chat_message("assistant"):
         df = active_chat["dataframe"]
+        img_data = active_chat.get("image_data") # Get uploaded image
         intent = classify_intent(final_prompt, has_data=(df is not None))
         
         # --- IMAGE GENERATION ---
         if intent == "IMAGE":
             with st.spinner("🎨 Painting..."):
                 image_result = generate_image(final_prompt)
-                
                 if isinstance(image_result, bytes):
                     st.image(image_result, caption=final_prompt)
-                    active_chat["messages"].append({
-                        "role": "assistant", 
-                        "content": f"Here is your image: {final_prompt}", 
-                        "image_bytes": image_result
-                    })
+                    active_chat["messages"].append({"role": "assistant", "content": f"Here is your image: {final_prompt}", "image_bytes": image_result})
                 else:
                     st.image(image_result, caption=final_prompt)
-                    active_chat["messages"].append({
-                        "role": "assistant", 
-                        "content": f"Here is your image: {final_prompt}", 
-                        "image_url": image_result
-                    })
+                    active_chat["messages"].append({"role": "assistant", "content": f"Here is your image: {final_prompt}", "image_url": image_result})
         
-        # --- STANDARD PATH ---
+        # --- STANDARD / VISION PATH ---
         else:
             search_results = []
-            if intent == "SEARCH" or (deep_mode and not df and not active_chat["doc_text"]):
+            # Only search if we don't have Docs or Image context (Vision usually answers from the image)
+            if (intent == "SEARCH" or deep_mode) and not df and not active_chat["doc_text"] and not img_data:
                 with st.spinner("Searching..."):
                     search_results = search_web(final_prompt, deep_mode)
             
+            # Send everything (Docs + Web + PDF + Image) to the AI
             full_response = st.write_stream(
-                stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"], df)
+                stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data)
             )
             
             # Code Execution
