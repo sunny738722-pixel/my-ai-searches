@@ -3,6 +3,7 @@ from groq import Groq
 from tavily import TavilyClient
 import uuid
 import json
+import PyPDF2 # The new tool for reading PDFs
 
 # ------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
@@ -13,7 +14,6 @@ st.markdown("""
 <style>
     .stChatInput {position: fixed; bottom: 20px;}
     .stChatMessage {padding: 1rem; border-radius: 10px; margin-bottom: 1rem;}
-    /* Make the status box look cool */
     .stStatus {border: 1px solid #e0e0e0; border-radius: 10px; background: #f9f9f9;}
 </style>
 """, unsafe_allow_html=True)
@@ -25,8 +25,15 @@ if "all_chats" not in st.session_state:
     st.session_state.all_chats = {} 
 if "active_chat_id" not in st.session_state:
     new_id = str(uuid.uuid4())
-    st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": []}
+    st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": ""}
     st.session_state.active_chat_id = new_id
+
+# Helper to get active chat
+active_id = st.session_state.active_chat_id
+# Safety check
+if active_id not in st.session_state.all_chats:
+    st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": ""}
+active_chat = st.session_state.all_chats[active_id]
 
 # ------------------------------------------------------------------
 # 3. SIDEBAR
@@ -34,19 +41,43 @@ if "active_chat_id" not in st.session_state:
 with st.sidebar:
     st.title("🧠 Research Center")
     
-    # 1. DEEP MODE TOGGLE (The New Feature)
+    # --- NEW FEATURE: DOCUMENT UPLOADER ---
+    st.markdown("### 📂 Knowledge Base")
+    uploaded_file = st.file_uploader("Upload a PDF to chat with it:", type="pdf")
+    
+    if uploaded_file:
+        # Extract text from PDF
+        try:
+            reader = PyPDF2.PdfReader(uploaded_file)
+            doc_text = ""
+            for page in reader.pages:
+                doc_text += page.extract_text() + "\n"
+            
+            # Save to current chat memory
+            st.session_state.all_chats[active_id]["doc_text"] = doc_text
+            st.success(f"✅ Loaded: {uploaded_file.name}")
+        except Exception as e:
+            st.error(f"Error reading PDF: {e}")
+
+    if st.session_state.all_chats[active_id].get("doc_text"):
+        st.info("📄 Document Active: The AI will answer based on this file.")
+
+    st.divider()
+    
+    # Deep Mode Toggle
     st.markdown("### 🕵️ Search Mode")
-    deep_mode = st.toggle("🚀 Deep Research", value=False, help="Runs multiple searches for complex questions. Slower but smarter.")
+    deep_mode = st.toggle("🚀 Deep Research", value=False, help="Enable for complex web searches.")
     
     st.divider()
     
-    # 2. CHAT CONTROLS
+    # Chat Controls
     if st.button("➕ New Discussion", use_container_width=True, type="primary"):
         new_id = str(uuid.uuid4())
-        st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": []}
+        st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": ""}
         st.session_state.active_chat_id = new_id
         st.rerun()
 
+    # History
     st.markdown("### 🗂️ History")
     for chat_id in reversed(list(st.session_state.all_chats.keys())):
         chat = st.session_state.all_chats[chat_id]
@@ -62,7 +93,7 @@ with st.sidebar:
                 del st.session_state.all_chats[chat_id]
                 if chat_id == st.session_state.active_chat_id:
                     new_id = str(uuid.uuid4())
-                    st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": []}
+                    st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": ""}
                     st.session_state.active_chat_id = new_id
                 st.rerun()
 
@@ -77,99 +108,72 @@ except Exception:
     st.stop()
 
 # ------------------------------------------------------------------
-# 5. SMART LOGIC (Deep Research)
+# 5. LOGIC FUNCTIONS
 # ------------------------------------------------------------------
 
 def generate_sub_queries(user_query):
-    """Asks the AI to break the user's question into 3 search terms"""
-    system_prompt = (
-        "You are a search engine expert. Break the user's question into 3 distinct, high-quality search queries "
-        "to gather comprehensive information. Return ONLY a JSON list of strings. "
-        "Example: [\"query 1\", \"query 2\", \"query 3\"]"
-    )
-    
+    # (Same as before)
+    system_prompt = "You are a search expert. Return 3 search queries as a JSON list. Example: [\"q1\", \"q2\"]"
     try:
         response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant", # Use fast model for this simple task
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_query}
-            ],
-            temperature=0,
-            response_format={"type": "json_object"}
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_query}],
+            temperature=0, response_format={"type": "json_object"}
         )
-        # Parse the JSON response
         json_data = json.loads(response.choices[0].message.content)
-        # Handle cases where the AI might use different keys
-        if "queries" in json_data:
-            return json_data["queries"]
-        elif "list" in json_data:
-            return json_data["list"]
-        else:
-            return list(json_data.values())[0] # Grab the first list found
+        return list(json_data.values())[0]
     except:
-        # Fallback if AI fails
         return [user_query]
 
 def search_web(query, is_deep_mode):
-    """
-    Standard Mode: 1 Search
-    Deep Mode: 3 Searches (15+ results)
-    """
-    final_results = []
-    status_msg = st.empty() # Placeholder for updates
-    
+    # (Same as before)
     if is_deep_mode:
-        # Step 1: Brainstorm
-        with st.status("🕵️ Deep Research in progress...", expanded=True) as status:
-            st.write("🤔 Breaking down the question...")
+        with st.status("🕵️ Deep Research...", expanded=True) as status:
             sub_queries = generate_sub_queries(query)
-            
-            # Step 2: Multi-Search
+            final_results = []
             for q in sub_queries:
                 st.write(f"🔎 Searching: '{q}'...")
                 try:
-                    response = tavily_client.search(q, max_results=4)
-                    results = response.get("results", [])
+                    results = tavily_client.search(q, max_results=3).get("results", [])
                     final_results.extend(results)
-                except:
-                    continue
+                except: continue
             
-            # Remove duplicates based on URL
-            seen_urls = set()
-            unique_results = []
+            # Deduplicate
+            seen = set()
+            unique = []
             for r in final_results:
-                if r['url'] not in seen_urls:
-                    unique_results.append(r)
-                    seen_urls.add(r['url'])
-            
-            st.write(f"📚 Analyzed {len(unique_results)} sources.")
-            status.update(label="✅ Deep Research Complete", state="complete", expanded=False)
-            final_results = unique_results
-            
+                if r['url'] not in seen:
+                    unique.append(r)
+                    seen.add(r['url'])
+            status.update(label="✅ Research Complete", state="complete", expanded=False)
+            return unique
     else:
-        # Standard Mode (Fast)
-        response = tavily_client.search(query, max_results=5)
-        final_results = response.get("results", [])
+        return tavily_client.search(query, max_results=5).get("results", [])
 
-    # Format for AI
-    context_text = ""
-    for i, result in enumerate(final_results):
-        context_text += f"SOURCE {i+1}: {result['title']} | URL: {result['url']} | CONTENT: {result['content']}\n\n"
-        
-    return context_text, final_results
+def stream_ai_answer(messages, search_results, doc_text):
+    # --- PROMPT ENGINEERING: THE LIBRARIAN ---
+    
+    # 1. Format Web Results
+    web_context = ""
+    if search_results:
+        for i, r in enumerate(search_results):
+            web_context += f"WEB SOURCE {i+1}: {r['title']} | {r['content']}\n"
+            
+    # 2. Format Document Context
+    doc_context = ""
+    if doc_text:
+        doc_context = f"\n\n📂 UPLOADED DOCUMENT CONTENT:\n{doc_text[:30000]}..." # Limit to 30k chars to be safe
 
-def stream_ai_answer(messages, search_context):
+    # 3. Build the Master Prompt
     system_prompt = {
         "role": "system",
         "content": (
-            "You are a professional research assistant. "
-            "Using the extensive context provided, write a comprehensive, detailed answer. "
-            "\n- Use H2 and H3 headers to organize sections."
-            "\n- Use bullet points for readability."
-            "\n- Cite sources [1], [2] frequently."
-            "\n- Be objective and thorough."
-            f"\n\nSEARCH CONTEXT:\n{search_context}"
+            "You are an expert research assistant."
+            "\n- If the user asks about the Uploaded Document, prioritize the content in '📂 UPLOADED DOCUMENT CONTENT'."
+            "\n- If the user asks a general question, use the 'WEB SOURCE' information."
+            "\n- Always cite your sources (e.g., [Page 2] or [Source 1])."
+            f"\n\n{web_context}"
+            f"\n\n{doc_context}"
         )
     }
     
@@ -177,7 +181,7 @@ def stream_ai_answer(messages, search_context):
     
     try:
         stream = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile", # Always use the smart model
+            model="llama-3.3-70b-versatile",
             messages=[system_prompt] + clean_history,
             temperature=0.6,
             stream=True,
@@ -191,14 +195,6 @@ def stream_ai_answer(messages, search_context):
 # ------------------------------------------------------------------
 # 6. MAIN UI
 # ------------------------------------------------------------------
-if st.session_state.active_chat_id not in st.session_state.all_chats:
-    new_id = str(uuid.uuid4())
-    st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": []}
-    st.session_state.active_chat_id = new_id
-
-active_id = st.session_state.active_chat_id
-active_chat = st.session_state.all_chats[active_id]
-
 st.title(f"{active_chat['title']}")
 
 # Display History
@@ -206,45 +202,47 @@ for message in active_chat["messages"]:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if "sources" in message and message["sources"]:
-            with st.expander(f"📚 {len(message['sources'])} Sources"):
+            with st.expander(f"📚 {len(message['sources'])} Web Sources"):
                 for source in message["sources"]:
                     st.markdown(f"- [{source['title']}]({source['url']})")
 
 # Input Handling
-if prompt := st.chat_input("Ask a question..."):
+if prompt := st.chat_input("Ask about your PDF or the web..."):
     
     with st.chat_message("user"):
         st.markdown(prompt)
-    st.session_state.all_chats[active_id]["messages"].append({"role": "user", "content": prompt})
+    active_chat["messages"].append({"role": "user", "content": prompt})
     
     # Rename silently
     if len(active_chat["messages"]) == 1:
         st.session_state.all_chats[active_id]["title"] = " ".join(prompt.split()[:5]) + "..."
     
     with st.chat_message("assistant"):
-        # We pass the "deep_mode" toggle value to the search function
-        if not deep_mode:
-            with st.spinner("🔎 Searching..."):
-                search_context, sources = search_web(prompt, False)
-        else:
-            # Deep mode has its own spinner inside the function
-            search_context, sources = search_web(prompt, True)
-            
+        # 1. Decide if we need to search the web
+        # (If deep mode is ON, we always search. If OFF, we only search if no doc is present OR if prompt implies it)
+        search_results = []
+        if deep_mode or not active_chat["doc_text"]:
+             if deep_mode:
+                 search_results = search_web(prompt, True)
+             else:
+                 with st.spinner("🔎 Searching..."):
+                     search_results = search_web(prompt, False)
+        
+        # 2. Generate Answer (Injecting both Web + Doc context)
         full_response = st.write_stream(
-            stream_ai_answer(st.session_state.all_chats[active_id]["messages"], search_context)
+            stream_ai_answer(active_chat["messages"], search_results, active_chat["doc_text"])
         )
         
-        if sources:
+        if search_results:
             with st.expander("📚 Sources Used"):
-                for source in sources:
+                for source in search_results:
                     st.markdown(f"- [{source['title']}]({source['url']})")
     
-    st.session_state.all_chats[active_id]["messages"].append({
+    active_chat["messages"].append({
         "role": "assistant", 
         "content": full_response,
-        "sources": sources
+        "sources": search_results
     })
     
-    # Sidebar refresh
     if len(active_chat["messages"]) == 2:
         st.rerun()
