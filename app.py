@@ -43,6 +43,7 @@ if "active_chat_id" not in st.session_state:
     st.session_state.active_chat_id = new_id
 
 active_id = st.session_state.active_chat_id
+# Safety Check
 if active_id not in st.session_state.all_chats:
     st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None, "image_data": None}
 active_chat = st.session_state.all_chats[active_id]
@@ -90,39 +91,40 @@ with st.sidebar:
         base64_image = base64.b64encode(bytes_data).decode('utf-8')
         st.session_state.all_chats[active_id]["image_data"] = base64_image
         st.success(f"✅ Loaded Image: {uploaded_img.name}")
-        st.image(uploaded_img, caption="Vision Context Active", use_container_width=True)
+        st.image(uploaded_img, caption="Context Active", use_container_width=True)
 
     st.divider()
     
-    # SETTINGS
-    st.markdown("### ⚙️ Settings")
-    use_deepseek = st.toggle("🧠 DeepSeek R1 (Thinking)", value=False)
-    deep_mode = st.toggle("🚀 Deep Research", value=False)
+    # --- MASTER SETTINGS ---
+    st.markdown("### ⚙️ Intelligence Settings")
+    
+    use_deepseek = st.toggle("🧠 DeepSeek R1 (Thinking Mode)", value=False)
+    deep_mode = st.toggle("🚀 Deep Research (Web)", value=False)
     enable_voice = st.toggle("🔊 Hear AI Response", value=False)
     
-    with st.expander("🔌 Model Config (Advanced)", expanded=True):
-        # 1. VISION MODEL SELECTOR
-        vision_model_name = st.selectbox(
-            "Vision Model:", 
-            ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview"],
-            index=0
-        )
-        # 2. DEEPSEEK MODEL SELECTOR (New!)
-        # Gives you multiple options so you are never stuck.
-        deepseek_choice = st.selectbox(
-            "DeepSeek Model:", 
-            [
-                "deepseek-r1-distill-llama-70b",    # Most powerful
-                "deepseek-r1-distill-qwen-32b",     # Fast
-                "deepseek-r1-distill-llama-8b",     # Super Fast (Low fail rate)
-                "Custom..."                         # Backup
-            ],
-            index=0
-        )
+    # MASTER MODEL CONTROL PANEL
+    with st.expander("🔧 Fix Model Errors (Advanced)", expanded=False):
+        st.caption("If you get Error 400 (Decommissioned), switch models here.")
         
-        # If user selects "Custom", show a text box to type whatever new name Groq invents
+        # 1. VISION MODEL SELECTOR
+        vision_choice = st.selectbox(
+            "👁️ Vision Model:", 
+            ["llama-3.2-11b-vision-preview", "llama-3.2-90b-vision-preview", "Custom..."],
+            index=0
+        )
+        if vision_choice == "Custom...":
+            vision_model_name = st.text_input("Enter Vision Model Name:", value="llama-3.2-11b-vision-preview")
+        else:
+            vision_model_name = vision_choice
+            
+        # 2. DEEPSEEK MODEL SELECTOR
+        deepseek_choice = st.selectbox(
+            "🧠 DeepSeek Model:", 
+            ["deepseek-r1-distill-qwen-32b", "deepseek-r1-distill-llama-70b", "Custom..."],
+            index=0 # Default to 32b since 70b is dying
+        )
         if deepseek_choice == "Custom...":
-            deepseek_model_name = st.text_input("Enter Model Name:", value="deepseek-r1-distill-llama-70b")
+            deepseek_model_name = st.text_input("Enter DeepSeek Model Name:", value="deepseek-r1-distill-qwen-32b")
         else:
             deepseek_model_name = deepseek_choice
 
@@ -242,6 +244,7 @@ def stream_ai_answer(messages, search_results, doc_text, df, image_data, vision_
 
     # --- BRAIN SELECTION LOGIC ---
     if image_data:
+        # VISION MODE
         model = vision_model_name 
         system_content = f"You are a helpful AI Assistant. Analyze the image provided. Use this context if available: {context_text}"
         user_content = [
@@ -251,7 +254,7 @@ def stream_ai_answer(messages, search_results, doc_text, df, image_data, vision_
         final_messages = [{"role": "system", "content": system_content}, {"role": "user", "content": user_content}]
     
     elif use_deepseek:
-        # DEEPSEEK MODE (Uses Sidebar Selection)
+        # DEEPSEEK MODE
         model = deepseek_model_name
         final_messages = [{"role": "system", "content": "You are a reasoning AI. Think step-by-step."}] + [{"role": m["role"], "content": m["content"]} for m in messages]
         final_messages[-1]["content"] += f"\n\nCONTEXT:\n{context_text}"
@@ -268,7 +271,7 @@ def stream_ai_answer(messages, search_results, doc_text, df, image_data, vision_
             messages=final_messages,
             temperature=0.6,
             stream=True,
-            max_tokens=6000 
+            max_tokens=6000 # Stop infinite thinking
         )
         for chunk in stream:
             if chunk.choices[0].delta.content:
@@ -285,14 +288,15 @@ st.title(f"{active_chat['title']}")
 for i, message in enumerate(active_chat["messages"]):
     with st.chat_message(message["role"]):
         content = message["content"]
+        # DeepSeek Parsing
         if "<think>" in content and "</think>" in content:
             try:
                 parts = re.split(r'</?think>', content)
-                thought_process = parts[1].strip()
-                final_answer = parts[2].strip()
+                thought = parts[1].strip()
+                answer = parts[2].strip()
                 with st.expander("💭 Thinking Process"):
-                    st.markdown(thought_process)
-                st.markdown(final_answer)
+                    st.markdown(thought)
+                st.markdown(answer)
             except:
                 st.markdown(content)
         else:
@@ -337,6 +341,7 @@ if final_prompt:
         img_data = active_chat.get("image_data")
         intent = classify_intent(final_prompt, has_data=(df is not None))
         
+        # --- IMAGE GENERATION ---
         if intent == "IMAGE":
             with st.spinner("🎨 Painting..."):
                 image_result = generate_image(final_prompt)
@@ -346,6 +351,8 @@ if final_prompt:
                 else:
                     st.image(image_result, caption=final_prompt)
                     active_chat["messages"].append({"role": "assistant", "content": f"Here is your image: {final_prompt}", "image_url": image_result})
+        
+        # --- STANDARD / DEEPSEEK / VISION PATH ---
         else:
             search_results = []
             if (intent == "SEARCH" or deep_mode) and not df and not active_chat["doc_text"] and not img_data:
@@ -361,18 +368,22 @@ if final_prompt:
                 full_response += chunk
                 placeholder.markdown(full_response + "▌")
             
+            # Post-Processing
             if "<think>" in full_response and "</think>" in full_response:
                 placeholder.empty()
-                parts = re.split(r'</?think>', full_response)
-                thought = parts[1].strip()
-                answer = parts[2].strip() if len(parts) > 2 else ""
-                
-                with st.expander("💭 Thinking Process"):
-                    st.markdown(thought)
-                st.markdown(answer)
+                try:
+                    parts = re.split(r'</?think>', full_response)
+                    thought = parts[1].strip()
+                    answer = parts[2].strip() if len(parts) > 2 else ""
+                    with st.expander("💭 Thinking Process"):
+                        st.markdown(thought)
+                    st.markdown(answer)
+                except:
+                     placeholder.markdown(full_response)
             else:
                 placeholder.markdown(full_response)
             
+            # Code Execution
             code_block = None
             if df is not None:
                 match = re.search(r"```python(.*?)```", full_response, re.DOTALL)
@@ -382,6 +393,7 @@ if final_prompt:
                     result = execute_python_code(code_block, df)
                     if "Error" in result: st.error(result)
             
+            # Voice
             audio_file = None
             if enable_voice:
                 text_to_speak = full_response
