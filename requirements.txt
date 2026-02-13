@@ -1,5 +1,6 @@
 streamlit
 groq
+google-generativeai
 tavily-python
 duckduckgo-search
 PyPDF2
