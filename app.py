@@ -12,6 +12,7 @@ import tempfile
 import os
 import requests
 from PIL import Image
+import io
 
 # ------------------------------------------------------------------
 # 1. PAGE CONFIGURATION
@@ -52,7 +53,7 @@ active_chat = st.session_state.all_chats[active_id]
 # ------------------------------------------------------------------
 with st.sidebar:
     st.title("🧠 Research Center")
-    st.caption("Powered by Google Gemini")
+    st.caption("Hybrid Engine: Gemini + Llama")
     
     # A. DATA ANALYST
     st.markdown("### 📊 Data Analyst")
@@ -95,25 +96,9 @@ with st.sidebar:
     st.divider()
     
     # SETTINGS
-    st.markdown("### ⚙️ Intelligence Settings")
+    st.markdown("### ⚙️ Settings")
     deep_mode = st.toggle("🚀 Deep Research (Web)", value=False)
     enable_voice = st.toggle("🔊 Hear AI Response", value=False)
-    
-    # MASTER MODEL SWITCH
-    # If one model fails (404 Not Found), try the next one in the list.
-    gemini_model_name = st.selectbox(
-        "Select Gemini Model:", 
-        [
-            "gemini-1.5-flash",        # Standard (Fast)
-            "gemini-1.5-flash-001",    # Version Pinned (More Stable)
-            "gemini-1.5-flash-002",    # Newer Version
-            "gemini-2.0-flash-exp",    # Experimental (Smartest)
-            "gemini-1.5-pro",          # Heavy Duty
-            "gemini-pro"               # Legacy (Old but Global)
-        ],
-        index=0,
-        help="If you get Error 404, switch to a different model here."
-    )
     
     # EXPORT
     if st.button("📥 Download Chat PDF"):
@@ -148,16 +133,19 @@ with st.sidebar:
             st.rerun()
 
 # ------------------------------------------------------------------
-# 4. API KEYS
+# 4. API KEYS (ROBUST LOADING)
 # ------------------------------------------------------------------
 try:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
-    tavily_client = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
-    HF_TOKEN = st.secrets["HF_TOKEN"]
-except Exception:
-    st.error("🚨 API Keys missing! Check Streamlit Settings.")
-    st.stop()
+    if "GEMINI_API_KEY" in st.secrets:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    if "GROQ_API_KEY" in st.secrets:
+        groq_client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+    if "TAVILY_API_KEY" in st.secrets:
+        tavily_client = TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
+    if "HF_TOKEN" in st.secrets:
+        HF_TOKEN = st.secrets["HF_TOKEN"]
+except Exception as e:
+    st.error(f"🚨 API Key Error: {e}")
 
 # ------------------------------------------------------------------
 # 5. LOGIC FUNCTIONS
@@ -175,11 +163,13 @@ def classify_intent(user_query, has_data=False):
     if has_data:
         if any(w in uq_lower for w in ["plot", "chart", "graph"]): return "PLOT"
         if any(w in uq_lower for w in ["analyze", "summary"]): return "ANALYZE"
-    return "CHAT" # Simplified for Gemini
+    return "CHAT"
 
 def search_web(query, is_deep_mode):
-    if is_deep_mode: return tavily_client.search(query, max_results=5).get("results", [])
-    return tavily_client.search(query, max_results=3).get("results", [])
+    try:
+        if is_deep_mode: return tavily_client.search(query, max_results=5).get("results", [])
+        return tavily_client.search(query, max_results=3).get("results", [])
+    except: return []
 
 def execute_python_code(code, df):
     local_vars = {"pd": pd, "st": st, "df": df}
@@ -216,8 +206,10 @@ def generate_image(prompt):
         clean_prompt = prompt.replace(" ", "%20")
         return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
-def stream_gemini_answer(messages, search_results, doc_text, df, image_data, model_name):
-    # 1. Context
+# --- THE CASCADE ENGINE (FALLBACK SYSTEM) ---
+def get_ai_response_stream(messages, search_results, doc_text, df, image_data):
+    
+    # 1. Build Context String
     context_text = ""
     if search_results:
         context_text += "\nWEB SOURCES:\n" + "\n".join([f"- {r['title']}: {r['content']}" for r in search_results])
@@ -227,28 +219,56 @@ def stream_gemini_answer(messages, search_results, doc_text, df, image_data, mod
         context_text += f"\n\nDATAFRAME PREVIEW:\n{df.head().to_markdown()}"
         context_text += "\n\nINSTRUCTIONS: If asked to visualize/plot, write Python code wrapped in ```python ... ```."
 
-    # 2. Prompt Construction
-    system_prompt = f"You are a helpful AI Assistant. Use this context to answer: {context_text}"
-    prompt_content = [system_prompt]
-    
-    for msg in messages:
-        prompt_content.append(f"{msg['role'].upper()}: {msg['content']}")
-    
-    if image_data:
-        prompt_content.append("User uploaded an image:")
-        prompt_content.append(image_data)
-    
-    prompt_content.append("ASSISTANT:") 
-
+    # --- ATTEMPT 1: GOOGLE GEMINI 2.0 (The Smartest) ---
     try:
-        # 3. Initialize Model with Selected Name
-        model = genai.GenerativeModel(model_name)
+        system_prompt = f"You are a helpful AI Assistant. Use this context to answer: {context_text}"
+        prompt_content = [system_prompt]
+        for msg in messages:
+            prompt_content.append(f"{msg['role'].upper()}: {msg['content']}")
+        
+        if image_data:
+            prompt_content.append("User uploaded an image:")
+            prompt_content.append(image_data)
+        
+        prompt_content.append("ASSISTANT:") 
+
+        # Try the experimental flash model first (it's new and robust)
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
         response = model.generate_content(prompt_content, stream=True)
         for chunk in response:
-            if chunk.text:
-                yield chunk.text
-    except Exception as e:
-        yield f"❌ Gemini Error: {e}"
+            if chunk.text: yield chunk.text
+            
+    except Exception as e_google:
+        # --- ATTEMPT 2: GOOGLE GEMINI 1.5 (The Backup) ---
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content(prompt_content, stream=True)
+            for chunk in response:
+                if chunk.text: yield chunk.text
+                
+        except Exception as e_google_backup:
+            # --- ATTEMPT 3: GROQ (The Fallback) ---
+            # If Google fails (Region lock/API error), switch to Llama 3 on Groq
+            try:
+                yield "⚠️ *Gemini failed, switching to Llama 3...*\n\n"
+                
+                # Convert Image to Base64 for Groq if needed
+                groq_messages = [{"role": "system", "content": system_prompt}] + [{"role": m["role"], "content": m["content"]} for m in messages]
+                
+                # Note: This Groq fallback is TEXT ONLY for stability unless we do complex base64 conversion
+                # We will stick to text fallback to ensure at least a reply
+                
+                stream = groq_client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=groq_messages,
+                    stream=True
+                )
+                for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        yield chunk.choices[0].delta.content
+                        
+            except Exception as e_groq:
+                 yield f"❌ TOTAL FAILURE. Google Error: {e_google}. Groq Error: {e_groq}"
 
 # ------------------------------------------------------------------
 # 6. MAIN UI
@@ -281,11 +301,8 @@ if prompt:
     final_prompt = prompt
 
 if final_prompt:
-    if active_chat["messages"]:
-        if active_chat["messages"][-1]["role"] == "assistant":
-            if len(active_chat["messages"]) >= 2 and final_prompt == active_chat["messages"][-2]["content"]:
-                st.stop()
-
+    # Removed the "Double Submission Check" that was blocking repeated inputs
+    
     with st.chat_message("user"):
         st.markdown(final_prompt)
     active_chat["messages"].append({"role": "user", "content": final_prompt})
@@ -313,9 +330,9 @@ if final_prompt:
                 with st.spinner("Searching..."):
                     search_results = search_web(final_prompt, deep_mode)
             
-            # Pass the selected model name to the function
+            # CALL THE CASCADE ENGINE
             full_response = st.write_stream(
-                stream_gemini_answer(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data, gemini_model_name)
+                get_ai_response_stream(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data)
             )
             
             code_block = None
