@@ -39,14 +39,13 @@ if "active_chat_id" not in st.session_state:
         "title": "New Chat", 
         "messages": [], 
         "doc_text": "", 
-        "dataframe": None, 
-        "image_data": None
+        "dataframe": None
     }
     st.session_state.active_chat_id = new_id
 
 active_id = st.session_state.active_chat_id
 if active_id not in st.session_state.all_chats:
-    st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None, "image_data": None}
+    st.session_state.all_chats[active_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None}
 active_chat = st.session_state.all_chats[active_id]
 
 # ------------------------------------------------------------------
@@ -54,7 +53,7 @@ active_chat = st.session_state.all_chats[active_id]
 # ------------------------------------------------------------------
 with st.sidebar:
     st.title("🧠 Research Center")
-    st.caption("System Status: 🟢 Hybrid Online")
+    st.caption("v1.0 Stable Release")
     
     # A. DATA ANALYST
     st.markdown("### 📊 Data Analyst")
@@ -85,14 +84,11 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Error reading PDF: {e}")
 
-    # C. VISION EYE
-    st.markdown("### 👁️ Vision Eye")
-    uploaded_img = st.file_uploader("Upload Image:", type=["jpg", "jpeg", "png"])
-    if uploaded_img:
-        image = Image.open(uploaded_img)
-        st.session_state.all_chats[active_id]["image_data"] = image
-        st.success(f"✅ Loaded Image: {uploaded_img.name}")
-        st.image(uploaded_img, caption="Context Active", use_container_width=True)
+    # C. VISION EYE (Temporarily Disabled for Stability)
+    # st.markdown("### 👁️ Vision Eye")
+    # uploaded_img = st.file_uploader("Upload Image:", type=["jpg", "jpeg", "png"])
+    # if uploaded_img:
+    #     st.info("Vision module is currently undergoing maintenance.")
 
     st.divider()
     
@@ -101,10 +97,6 @@ with st.sidebar:
     deep_mode = st.toggle("🚀 Deep Research (Web)", value=False)
     enable_voice = st.toggle("🔊 Hear AI Response", value=False)
     
-    with st.expander("🔧 Advanced Config"):
-        st.info("If vision fails, change the backup model below.")
-        groq_vision_model = st.text_input("Backup Vision Model:", value="llama-3.2-11b-vision-preview")
-
     # EXPORT
     if st.button("📥 Download Chat PDF"):
         if active_chat["messages"]:
@@ -125,7 +117,7 @@ with st.sidebar:
     # HISTORY CONTROLS
     if st.button("➕ New Discussion", use_container_width=True, type="primary"):
         new_id = str(uuid.uuid4())
-        st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None, "image_data": None}
+        st.session_state.all_chats[new_id] = {"title": "New Chat", "messages": [], "doc_text": "", "dataframe": None}
         st.session_state.active_chat_id = new_id
         st.rerun()
 
@@ -211,8 +203,8 @@ def generate_image(prompt):
         clean_prompt = prompt.replace(" ", "%20")
         return f"https://image.pollinations.ai/prompt/{clean_prompt}"
 
-# --- THE SILENT CASCADE ENGINE ---
-def get_ai_response_stream(messages, search_results, doc_text, df, image_data, groq_vision_model):
+# --- THE STABLE HYBRID ENGINE ---
+def get_ai_response_stream(messages, search_results, doc_text, df):
     
     # Context
     context_text = ""
@@ -231,63 +223,32 @@ def get_ai_response_stream(messages, search_results, doc_text, df, image_data, g
         for msg in messages:
             prompt_content.append(f"{msg['role'].upper()}: {msg['content']}")
         
-        if image_data:
-            prompt_content.append("User uploaded an image:")
-            prompt_content.append(image_data)
-        
         prompt_content.append("ASSISTANT:") 
 
-        # Try Gemini 1.5 Flash first
+        # Using the standard stable model
         model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt_content, stream=True)
         for chunk in response:
             if chunk.text: yield chunk.text
             
     except Exception:
-        # --- ATTEMPT 2: SILENT FALLBACK TO GROQ ---
-        # No error message displayed to user, just switches.
+        # --- ATTEMPT 2: FALLBACK TO GROQ (LLAMA 3) ---
         try:
-            # Prepare Groq Messages
             groq_messages = [{"role": "system", "content": f"You are a helpful AI. {context_text}"}] 
-            
-            # Add History
             for m in messages:
                 groq_messages.append({"role": m["role"], "content": m["content"]})
-
-            # Check if we need VISION or TEXT
-            if image_data:
-                # VISION FALLBACK (Llama 3.2 Vision on Groq)
-                # Convert PIL image to base64
-                buffered = io.BytesIO()
-                image_data.save(buffered, format="JPEG")
-                img_str = base64.b64encode(buffered.getvalue()).decode()
-                
-                # Vision Payload
-                user_content = [
-                    {"type": "text", "text": messages[-1]["content"]},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_str}"}}
-                ]
-                groq_messages[-1]["content"] = user_content # Replace last text msg with multimodal msg
-                
-                stream = groq_client.chat.completions.create(
-                    model=groq_vision_model, # Uses the backup model name from settings
-                    messages=groq_messages,
-                    stream=True
-                )
-            else:
-                # TEXT FALLBACK (Llama 3.3)
-                stream = groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=groq_messages,
-                    stream=True
-                )
             
+            stream = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=groq_messages,
+                stream=True
+            )
             for chunk in stream:
                 if chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
                         
         except Exception as e_groq:
-             yield f"❌ System Error: Both engines failed. Please refresh. (Details: {e_groq})"
+             yield f"❌ Connectivity Error. Please refresh. (Details: {e_groq})"
 
 # ------------------------------------------------------------------
 # 6. MAIN UI
@@ -329,13 +290,7 @@ if final_prompt:
 
     with st.chat_message("assistant"):
         df = active_chat["dataframe"]
-        img_data = active_chat.get("image_data")
         intent = classify_intent(final_prompt, has_data=(df is not None))
-        
-        # Pull the backup vision model name from the expander input (default is 11b)
-        # Note: We can't access sidebar widget value easily here unless we put it in session state or simple var
-        # For simplicity, we hardcode the most stable one or rely on the user input if we move it up.
-        # Let's rely on the variable 'groq_vision_model' defined in sidebar.
         
         if intent == "IMAGE":
             with st.spinner("🎨 Painting..."):
@@ -348,13 +303,13 @@ if final_prompt:
                     active_chat["messages"].append({"role": "assistant", "content": f"Here is your image: {final_prompt}", "image_url": image_result})
         else:
             search_results = []
-            if (intent == "SEARCH" or deep_mode) and not df and not active_chat["doc_text"] and not img_data:
+            if (intent == "SEARCH" or deep_mode) and not df and not active_chat["doc_text"]:
                 with st.spinner("Searching..."):
                     search_results = search_web(final_prompt, deep_mode)
             
-            # CALL SILENT CASCADE
+            # CALL STABLE HYBRID ENGINE
             full_response = st.write_stream(
-                get_ai_response_stream(active_chat["messages"], search_results, active_chat["doc_text"], df, img_data, groq_vision_model)
+                get_ai_response_stream(active_chat["messages"], search_results, active_chat["doc_text"], df)
             )
             
             code_block = None
