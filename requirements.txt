@@ -1,6 +1,6 @@
 streamlit
-groq
 google-generativeai
+groq
 tavily-python
 duckduckgo-search
 PyPDF2
@@ -11,3 +11,4 @@ matplotlib
 tabulate
 gTTS
 requests
+Pillow
